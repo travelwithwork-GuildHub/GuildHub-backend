@@ -32,3 +32,13 @@ class SceneRegistry:
         if scene is None:
             scene = self._scenes[scene_id] = Scene(scene_id)
         return scene
+
+    def add_member(self, scene_id: str, conn) -> None:
+        """一條連線只屬於一個 scene（[R08]）。切換場景 = 關掉重開。"""
+        self.get_or_create(scene_id).members.add(conn)
+
+    def remove_member(self, scene_id: str, conn) -> None:
+        """移除不存在的成員不視為錯誤 —— 斷線與心跳逾時可能重複觸發。"""
+        scene = self._scenes.get(scene_id)
+        if scene is not None:
+            scene.members.discard(conn)
