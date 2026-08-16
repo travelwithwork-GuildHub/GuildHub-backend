@@ -10,17 +10,19 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app import config, db
 from app.realtime import protocol
+from app.realtime.broadcaster import Broadcaster
 from app.realtime.manager import ConnectionManager
 from app.realtime.presence import PresenceStore
 from app.realtime.scenes import SceneRegistry
 
 log = logging.getLogger("guildhub")
 
-# 即時層的全部狀態。單一 process，因此這三個物件就是「伺服器的記憶」——
+# 即時層的全部狀態。單一 process，因此這幾個物件就是「伺服器的記憶」——
 # 規格書 §2.2：40 人的狀態全放記憶體對單一 Python process 是輕負載。
 scenes = SceneRegistry()
 presence = PresenceStore()
 manager = ConnectionManager(scenes, presence)
+broadcaster = Broadcaster(scenes, presence)
 
 
 @contextlib.asynccontextmanager
@@ -30,7 +32,10 @@ async def lifespan(app: FastAPI):
         await db.connect()
     except Exception as exc:  # noqa: BLE001
         log.warning("資料庫未連上，僅即時層可用：%s", exc)
+
+    broadcaster.start()  # 10 Hz tick（[R19]）
     yield
+    await broadcaster.stop()
     await db.disconnect()
 
 

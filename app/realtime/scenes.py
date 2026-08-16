@@ -52,6 +52,10 @@ class SceneRegistry:
         scene = self._scenes.get(scene_id)
         return list(scene.members) if scene is not None else []
 
+    def ids(self) -> list[str]:
+        """現存的 scene id。Broadcaster 每個 tick 迭代它（[R19]）。"""
+        return list(self._scenes)
+
     def online_count(self, scene_id: str) -> int:
         """該 scene 當前連線數（[R10]）。
 
