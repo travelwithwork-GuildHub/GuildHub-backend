@@ -51,3 +51,13 @@ class SceneRegistry:
         """
         scene = self._scenes.get(scene_id)
         return list(scene.members) if scene is not None else []
+
+    def online_count(self, scene_id: str) -> int:
+        """該 scene 當前連線數（[R10]）。
+
+        規格書 §5.2：走廊的門要顯示「專案名稱 + 當前在線人數」。專案名稱在
+        PostgreSQL、人數在這裡，兩者由 api/rooms.py 合併 —— 那是兩層唯一的
+        接觸點（附錄 B ★）。
+        """
+        scene = self._scenes.get(scene_id)
+        return len(scene.members) if scene is not None else 0
