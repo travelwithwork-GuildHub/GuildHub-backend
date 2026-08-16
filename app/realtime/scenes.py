@@ -42,3 +42,12 @@ class SceneRegistry:
         scene = self._scenes.get(scene_id)
         if scene is not None:
             scene.members.discard(conn)
+
+    def members(self, scene_id: str) -> list:
+        """在線名單（[R09]）。不存在的 scene 回空清單，不建立它。
+
+        回傳快照（list）而非活的 set —— 廣播期間可能有人進出，直接迭代
+        set 會 RuntimeError。
+        """
+        scene = self._scenes.get(scene_id)
+        return list(scene.members) if scene is not None else []
