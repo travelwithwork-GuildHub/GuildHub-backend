@@ -9,6 +9,7 @@
 import asyncio
 import json
 from collections import Counter
+from urllib.parse import quote
 
 import websockets
 
@@ -63,7 +64,8 @@ class FakeClient:
         self.ws = await websockets.connect(
             self.url,
             open_timeout=open_timeout,
-            additional_headers={"x-fake-name": self.name},
+            # HTTP header 只吃 latin-1，中文暱稱必須先 percent-encode
+            additional_headers={"x-fake-name": quote(self.name)},
         )
         hello = await self.recv()
         if hello.get("t") != "hello":
