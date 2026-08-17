@@ -14,6 +14,7 @@ from app.realtime.broadcaster import Broadcaster
 from app.realtime.manager import ConnectionManager
 from app.realtime.presence import PresenceStore
 from app.realtime.scenes import SceneRegistry
+from app.room_token import InvalidRoomToken
 
 log = logging.getLogger("guildhub")
 
@@ -69,8 +70,9 @@ async def ws_endpoint(ws: WebSocket, scene: str = "lobby", token: str | None = N
     user_id, name = _identify(ws)
 
     try:
-        conn = await manager.connect(ws, user_id, name, scene)
-    except ValueError as exc:
+        conn = await manager.connect(ws, user_id, name, scene, token)
+    except (ValueError, InvalidRoomToken) as exc:
+        # 尚未 accept，close() 會讓握手直接以 HTTP 403 收場
         log.info("拒絕握手：%s", exc)
         await ws.close(code=1008)
         return

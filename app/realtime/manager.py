@@ -17,7 +17,9 @@ import time
 
 from fastapi import WebSocket
 
+from app import room_token
 from app.realtime import protocol
+from app.room_token import InvalidRoomToken
 from app.realtime.broadcaster import Broadcaster
 from app.realtime.presence import PresenceStore
 from app.realtime.scenes import SceneRegistry
@@ -49,11 +51,27 @@ class ConnectionManager:
         self.presence = presence
         self.broadcaster = broadcaster
 
+    def authenticate_handshake(self, scene: str, token: str | None) -> None:
+        """[R31]。房間必須帶合法 room_token；大廳不驗（[R16]）。
+
+        規格書 §6.2 與附錄 A.1：握手時驗證，失敗直接關閉連線。連上之後才驗
+        是不行的 —— 那條連線在被踢掉之前已經進了成員名單，會收到一輪廣播，
+        房間的隔音就破了。
+        """
+        if not scene.startswith("room:"):
+            return
+
+        project_id = scene.split(":", 1)[1]
+        claims = room_token.verify(token)  # 偽造／竄改／過期一律 InvalidRoomToken
+        if claims.project_id != project_id:
+            raise InvalidRoomToken("token 不屬於這個房間")
+
     async def connect(
-        self, ws: WebSocket, user_id: str, name: str, scene: str
+        self, ws: WebSocket, user_id: str, name: str, scene: str, token: str | None = None
     ) -> Connection:
-        """[R16]。大廳連線不驗 token；房間的 room_token 由 [R31] 在此之前擋下。"""
+        """[R16]。驗證全部排在 accept 之前，被拒的連線不會留下任何痕跡。"""
         self.scenes.get_or_create(scene)  # 格式不合直接 ValueError，不 accept
+        self.authenticate_handshake(scene, token)  # 房間才驗
 
         await ws.accept()
         conn = Connection(ws, user_id, name, scene)

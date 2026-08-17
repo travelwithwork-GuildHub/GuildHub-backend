@@ -9,6 +9,7 @@
 
 import asyncio
 
+from app import room_token
 from tools.fake_client import FakeClient
 
 
@@ -16,10 +17,20 @@ def chats(client) -> list[str]:
     return [m["body"] for m in client.inbox if m["t"] == "chat"]
 
 
+def room_client(name: str, project_id: str, port: int) -> FakeClient:
+    """進房間一定要帶 room_token（§6.2 / [R31]）。"""
+    return FakeClient(
+        name,
+        scene=f"room:{project_id}",
+        token=room_token.issue(project_id, name),
+        port=port,
+    )
+
+
 async def test_chat_isolation_lobby_chat_never_reaches_a_room(server):
     in_lobby = FakeClient("大廳甲", port=server)
     also_lobby = FakeClient("大廳乙", port=server)
-    in_room = FakeClient("房間丙", scene="room:chatiso", port=server)
+    in_room = room_client("房間丙", "chatiso", server)
     await in_lobby.connect()
     await also_lobby.connect()
     await in_room.connect()
@@ -43,8 +54,8 @@ async def test_chat_isolation_lobby_chat_never_reaches_a_room(server):
 
 async def test_chat_isolation_room_chat_never_reaches_the_lobby(server):
     in_lobby = FakeClient("大廳的", port=server)
-    room_a = FakeClient("房間甲", scene="room:chatiso2", port=server)
-    room_b = FakeClient("房間乙", scene="room:chatiso2", port=server)
+    room_a = room_client("房間甲", "chatiso2", server)
+    room_b = room_client("房間乙", "chatiso2", server)
     await in_lobby.connect()
     await room_a.connect()
     await room_b.connect()
@@ -65,8 +76,8 @@ async def test_chat_isolation_room_chat_never_reaches_the_lobby(server):
 
 
 async def test_chat_isolation_two_rooms_do_not_hear_each_other(server):
-    a = FakeClient("p1 的人", scene="room:chatp1", port=server)
-    b = FakeClient("p2 的人", scene="room:chatp2", port=server)
+    a = room_client("p1 的人", "chatp1", server)
+    b = room_client("p2 的人", "chatp2", server)
     await a.connect()
     await b.connect()
     await asyncio.sleep(0.3)
