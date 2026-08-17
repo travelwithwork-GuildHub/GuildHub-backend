@@ -147,6 +147,92 @@ async def test_seat_out_of_range_is_rejected_by_the_database(db, login):
     assert response.status_code == 400
 
 
+# ------------------------------------------------- 座位數上限（P1 裁決後加入）
+#
+# 規格書 §6.3：房間人數上限 = 座位數。這條約束跨兩張表，check 寫不出來，
+# 所以擋在 claim 的 insert ... where 裡。
+
+
+async def test_seat_beyond_seat_count_is_rejected(db, login):
+    """seat_count = 2 的房間不該接受 seat_index = 7。
+
+    這是加上容量檢查之前會通過的請求 —— 房間因此可以塞進 8 個人。
+    """
+    project_id, _owner = await open_room(login, seat_count=2)
+    member = await login("想坐第七格的")
+    await enter(member, project_id)
+
+    response = await member.post(
+        f"/api/projects/{project_id}/seats", json={"seat_index": 7}
+    )
+    assert response.status_code == 400, response.text
+    assert "2" in response.json()["detail"]
+
+
+async def test_seat_within_seat_count_still_works(db, login):
+    """反面：容量內的座位不能被誤擋。"""
+    project_id, _owner = await open_room(login, seat_count=2)
+    a = await login("坐第零格")
+    b = await login("坐第一格")
+    for client in (a, b):
+        await enter(client, project_id)
+
+    assert (
+        await a.post(f"/api/projects/{project_id}/seats", json={"seat_index": 0})
+    ).status_code == 201
+    assert (
+        await b.post(f"/api/projects/{project_id}/seats", json={"seat_index": 1})
+    ).status_code == 201
+
+
+async def test_room_is_full_when_every_seat_is_taken(db, login):
+    """§6.3：座位滿即房間滿。第三個人在兩人房裡無論選哪一格都進不去。"""
+    project_id, _owner = await open_room(login, seat_count=2)
+    a, b, c = [await login(f"成員{i}") for i in range(3)]
+    for client in (a, b, c):
+        await enter(client, project_id)
+
+    await a.post(f"/api/projects/{project_id}/seats", json={"seat_index": 0})
+    await b.post(f"/api/projects/{project_id}/seats", json={"seat_index": 1})
+
+    for seat_index, expected in ((0, 409), (1, 409), (2, 400), (7, 400)):
+        response = await c.post(
+            f"/api/projects/{project_id}/seats", json={"seat_index": seat_index}
+        )
+        assert response.status_code == expected, (
+            f"seat_index={seat_index} 回了 {response.status_code}，預期 {expected}"
+        )
+
+
+async def test_capacity_check_did_not_weaken_the_race_protection(db, login):
+    """加了容量檢查之後，同一格的競爭仍然只能有一個贏家。
+
+    容量檢查查的是 projects.seat_count，競爭防護靠的是 seats 的 PK ——
+    兩者正交。這個測試就是釘住「正交」這件事。
+    """
+    project_id, _owner = await open_room(login, seat_count=4)
+
+    contenders = [await login(f"搶手{i}") for i in range(6)]
+    for client in contenders:
+        await enter(client, project_id)
+
+    responses = await asyncio.gather(
+        *(
+            client.post(f"/api/projects/{project_id}/seats", json={"seat_index": 1})
+            for client in contenders
+        )
+    )
+    codes = sorted(r.status_code for r in responses)
+    assert codes.count(201) == 1, f"容量檢查破壞了競爭防護：{codes}"
+    assert codes.count(409) == 5
+
+
+# 註：claim 在 where 沒命中時會分辨「房間沒這格」(400) 與「根本沒這個房間」
+# (404)，但 404 那一支在實務上到不了 —— require_room_token 需要 session 裡有
+# room token，而 token 只由 /enter 簽發，/enter 對不存在的專案已經先回 404。
+# 這裡不為一條到不了的分支硬寫測試，留著這段說明即可。
+
+
 # ------------------------------------------------------------ [P41] 座位查詢
 
 

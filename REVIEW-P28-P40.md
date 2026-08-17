@@ -168,31 +168,42 @@ client 用 `asyncio.gather` 同時打同一格，斷言恰好一個 201、七個
 
 守則 §1 規則 7：遇到規格書未定義的情況，停下來提問，不要自行補完。
 
-### 3.1 `seat_count` 目前完全沒有被強制 ⚠ 最需要你看的一項
+### 3.1 `seat_count` 上限 ✅ 已依 P1 裁決加上檢查
 
-規格書 §6.3：
+原本的問題：`seat_index` 只被 `seat_in_range`（0–7）限制，沒有任何地方檢查
+`seat_index < projects.seat_count`，所以 `seat_count = 2` 的房間會接受
+`seat_index = 7`，規格書 §6.3 的「座位滿即房間滿」不成立。
 
-> **房間人數上限 = 座位數（預設 4）**，座位滿即房間滿，不需另寫容量判斷。
+**P1 裁決：加應用層檢查。** 已實作於
+[app/api/seats.py](app/api/seats.py)，但寫法上刻意避開一件事 ——
 
-**這個不變式目前不成立。** `seat_index` 只被 `seat_in_range`（0–7）限制，
-沒有任何地方檢查 `seat_index < projects.seat_count`：
-
+```sql
+insert into seats (project_id, seat_index, user_id, desk_template)
+select $1::uuid, $2::smallint, $3::uuid, $4::smallint
+from projects
+where id = $1::uuid and $2::smallint < seat_count
+returning ...
 ```
-seat_count = 2 的房間，POST {"seat_index": 7} 會成功。
-```
 
-於是「座位滿即房間滿」不成立 —— 房間可以塞進 8 個人。
+**這不是把「先查再寫」請回來了**，關鍵在於查的是哪張表：
 
-這條約束跨兩張表，PostgreSQL 的 check 寫不出來（需要 trigger 或
-`seat_count` 冗餘到 seats）。三個選項：
+| | 查什麼 | 會不會有競爭 |
+|---|---|---|
+| 危險的先查再寫 | `seats`：這格有沒有人坐？ | 會 —— 兩人同時查都得到「沒有」 |
+| 這裡的容量檢查 | `projects.seat_count`：這房間有沒有第 7 格？ | 不會 —— 跟誰在搶無關，成軍後也不再變動 |
 
-| 選項 | 代價 |
-|---|---|
-| 應用層檢查 | 違反「不變式寫在資料庫」，且是先查再寫 |
-| trigger | 資料庫多一個看不見的執行點 |
-| 接受現狀，由前端只顯示 `seat_count` 個座位 | 惡意或手滑的請求擋不住 |
+兩個不變式正交，所以競爭防護沒有被削弱：同時搶 seat 1 的兩個人一樣會通過
+容量檢查、一樣在 PK 上撞、一樣只有一個成功。
+`test_capacity_check_did_not_weaken_the_race_protection` 就是釘住這件事。
 
-我沒有自行選。這是規格書自己的內部落差，需要你裁決。
+寫成單一句 `INSERT ... SELECT` 而不是「先 fetchval 再 insert」，是為了成功
+路徑少一次來回，也為了不在這個檔案裡留下一段長得像正確寫法的先查再寫。
+
+**請確認**：
+
+- [ ] 容量條件在 `insert` 的 `where` 裡，不是獨立的一次 `select`
+- [ ] `row is None` 的診斷查詢只在失敗之後才跑，不在成功路徑上
+- [ ] 400（房間沒這格）與 409（這格有人／你已有位子）分得清楚
 
 ### 3.2 `read_at` 永遠是 null
 
