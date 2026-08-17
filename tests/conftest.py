@@ -26,8 +26,31 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+@pytest.fixture(scope="session")
+def db_unavailable() -> str | None:
+    """只探測一次資料庫在不在，回傳失敗原因（在的話回 None）。
+
+    沒有這層的話，[D01] 完成前每個需要資料庫的測試都要各自等一次連線逾時 ——
+    四十幾個測試就是好幾分鐘，慢到大家會開始習慣性跳過整個測試套件。
+    """
+    import asyncio
+
+    async def probe() -> str | None:
+        try:
+            conn = await asyncpg.connect(config.DATABASE_URL, timeout=3)
+        except Exception as exc:  # noqa: BLE001
+            # 一定要帶上型別名稱：連線逾時拋的是 TimeoutError，而它的
+            # str() 是空字串 —— 直接回 str(exc) 會得到 ""，被當成 falsy，
+            # 於是「資料庫不在」反而被讀成「資料庫在」。
+            return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        await conn.close()
+        return None
+
+    return asyncio.run(probe())
+
+
 @pytest.fixture
-async def db():
+async def db(db_unavailable):
     """[P01] 每個測試拿到一份乾淨 schema。
 
     刻意不提供 SQLite 後備：SQLite 的約束行為與 PostgreSQL 不同（enum、
@@ -36,10 +59,10 @@ async def db():
 
     沒有可用的 PostgreSQL 時直接 skip 並說明原因，不會安靜地通過。
     """
-    try:
-        pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=5)
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"沒有可用的 PostgreSQL（[D01] 尚未完成）：{exc}")
+    if db_unavailable:
+        pytest.skip(f"沒有可用的 PostgreSQL（[D01] 尚未完成）：{db_unavailable}")
+
+    pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=10)
 
     schema = (SQL_DIR / "001_schema.sql").read_text(encoding="utf-8")
     async with pool.acquire() as conn:
@@ -61,6 +84,31 @@ async def api(db):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
+
+
+@pytest.fixture
+async def login(db):
+    """產生多個各自登入的 client。
+
+    每個 client 有獨立的 cookie jar，所以是真的不同 session —— [P38] 的
+    座位競爭要靠這個，同一個 session 打兩次不算兩個人在搶。
+    """
+    opened: list[httpx.AsyncClient] = []
+
+    async def make(nickname: str) -> httpx.AsyncClient:
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        )
+        opened.append(client)
+        response = await client.post("/api/login", json={"nickname": nickname})
+        assert response.status_code == 200, response.text
+        client.user_id = response.json()["id"]
+        return client
+
+    yield make
+
+    for client in opened:
+        await client.aclose()
 
 
 def _boot(**kwargs) -> tuple[int, uvicorn.Server, threading.Thread]:
