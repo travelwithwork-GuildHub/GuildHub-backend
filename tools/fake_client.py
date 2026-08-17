@@ -7,13 +7,33 @@
 """
 
 import asyncio
+import base64
 import json
 from collections import Counter
 from urllib.parse import quote
 
+import itsdangerous
 import websockets
 
+from app import config
 from app.realtime import protocol
+
+
+def session_cookie(user_id: str, name: str = "訪客") -> str:
+    """簽一個 Starlette SessionMiddleware 認得的 session cookie。
+
+    房間連線需要真的身分：[R31] 會比對 room token 的簽發對象與連線者，匿名
+    連線拿到的是隨機 uuid，不可能對得上任何一張票。
+
+    正式流程是 POST /api/login 拿 cookie，但那需要資料庫（[P12]／[D01]）。
+    這裡直接用同一把 SESSION_SECRET 簽一個出來 —— 格式與 middleware 完全
+    相同，所以驗證路徑是真的，只是省掉登入那一步。
+    """
+    signer = itsdangerous.TimestampSigner(str(config.SESSION_SECRET))
+    payload = base64.b64encode(
+        json.dumps({"user_id": user_id, "name": name}).encode("utf-8")
+    )
+    return f"session={signer.sign(payload).decode('utf-8')}"
 
 
 class FakeClient:
@@ -24,12 +44,15 @@ class FakeClient:
         token: str | None = None,
         host: str = "127.0.0.1",
         port: int = 8000,
+        session_user: str | None = None,
     ):
         self.name = name
         self.scene = scene
         self.token = token
         self.host = host
         self.port = port
+        # 帶了就是「已登入」，不帶就是匿名訪客（大廳夠用，房間不夠）
+        self.session_user = session_user
 
         self.ws: websockets.ClientConnection | None = None
         self.you: str | None = None  # 握手後由 hello 填入
@@ -61,11 +84,13 @@ class FakeClient:
 
     async def connect(self, open_timeout: float = 10.0) -> dict:
         """連上並等 hello。回傳 hello 訊息本身。"""
+        # HTTP header 只吃 latin-1，中文暱稱必須先 percent-encode
+        headers = {"x-fake-name": quote(self.name)}
+        if self.session_user:
+            headers["Cookie"] = session_cookie(self.session_user, self.name)
+
         self.ws = await websockets.connect(
-            self.url,
-            open_timeout=open_timeout,
-            # HTTP header 只吃 latin-1，中文暱稱必須先 percent-encode
-            additional_headers={"x-fake-name": quote(self.name)},
+            self.url, open_timeout=open_timeout, additional_headers=headers
         )
         hello = await self.recv()
         if hello.get("t") != "hello":

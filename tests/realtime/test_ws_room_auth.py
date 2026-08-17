@@ -6,6 +6,8 @@
 踢掉之前已經進了 scene 成員名單，會收到一輪廣播，房間的隔音就破了。
 """
 
+import uuid
+
 import websockets
 
 from app import room_token
@@ -50,13 +52,55 @@ async def test_ws_room_auth_rejects_an_expired_token(server):
 
 
 async def test_ws_room_auth_accepts_a_valid_token(server):
-    tok = room_token.issue("auth1", "user-1")
-    client = FakeClient("有票的", scene="room:auth1", token=tok, port=server)
+    """票要簽給自己，而且連線要帶得出對應的身分。"""
+    user_id = str(uuid.uuid4())
+    client = FakeClient(
+        "有票的",
+        scene="room:auth1",
+        token=room_token.issue("auth1", user_id),
+        session_user=user_id,
+        port=server,
+    )
     hello = await client.connect()
     try:
         assert hello["t"] == "hello"
+        assert hello["you"] == user_id  # 身分來自 session，不是隨機指派
     finally:
         await client.close()
+
+
+async def test_ws_room_auth_rejects_someone_elses_token(server):
+    """簽章合法、房間也對，但票不是簽給我的。
+
+    這與 REST 端的 deps.require_room_token 是同一條規則 —— 同一種 token
+    在兩個入口的門檻必須一樣，否則遲早有人從鬆的那邊進來。
+    """
+    me, someone_else = str(uuid.uuid4()), str(uuid.uuid4())
+    await _expect_rejected(
+        FakeClient(
+            "借票的",
+            scene="room:auth1",
+            token=room_token.issue("auth1", someone_else),
+            session_user=me,
+            port=server,
+        )
+    )
+
+
+async def test_ws_room_auth_rejects_anonymous_even_with_a_valid_token(server):
+    """匿名連線進不了房間。
+
+    這是加上持有人比對的直接後果：匿名身分是伺服器隨機指派的，對不上任何
+    一張票。符合 §6.2 —— 票是拿房間密碼向 /enter 換來的，沒有匿名進房這條路。
+    """
+    await _expect_rejected(
+        FakeClient(
+            "沒登入的",
+            scene="room:auth1",
+            token=room_token.issue("auth1", str(uuid.uuid4())),
+            port=server,  # 沒有 session_user
+        )
+    )
 
 
 async def test_ws_room_auth_does_not_apply_to_the_lobby(server):

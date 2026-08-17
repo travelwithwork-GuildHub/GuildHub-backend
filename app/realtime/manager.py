@@ -51,12 +51,22 @@ class ConnectionManager:
         self.presence = presence
         self.broadcaster = broadcaster
 
-    def authenticate_handshake(self, scene: str, token: str | None) -> None:
+    def authenticate_handshake(
+        self, scene: str, token: str | None, user_id: str
+    ) -> None:
         """[R31]。房間必須帶合法 room_token；大廳不驗（[R16]）。
 
         規格書 §6.2 與附錄 A.1：握手時驗證，失敗直接關閉連線。連上之後才驗
         是不行的 —— 那條連線在被踢掉之前已經進了成員名單，會收到一輪廣播，
         房間的隔音就破了。
+
+        三個條件跟 REST 端的 deps.require_room_token 一致：簽章合法、房間
+        對得上、持有人是自己。兩處驗法必須一樣 —— 同一種 token 在不同入口
+        有不同的門檻，遲早會有人從鬆的那邊進來。
+
+        持有人比對的副作用是「進房間一定要先登入」：匿名連線拿到的是隨機
+        身分，不可能對得上任何一張票。這符合 §6.2 —— 票是 /enter 用房間
+        密碼換來的，本來就不該有匿名進房這條路。
         """
         if not scene.startswith("room:"):
             return
@@ -65,13 +75,15 @@ class ConnectionManager:
         claims = room_token.verify(token)  # 偽造／竄改／過期一律 InvalidRoomToken
         if claims.project_id != project_id:
             raise InvalidRoomToken("token 不屬於這個房間")
+        if claims.user_id != user_id:
+            raise InvalidRoomToken("token 不屬於你")
 
     async def connect(
         self, ws: WebSocket, user_id: str, name: str, scene: str, token: str | None = None
     ) -> Connection:
         """[R16]。驗證全部排在 accept 之前，被拒的連線不會留下任何痕跡。"""
         self.scenes.get_or_create(scene)  # 格式不合直接 ValueError，不 accept
-        self.authenticate_handshake(scene, token)  # 房間才驗
+        self.authenticate_handshake(scene, token, user_id)  # 房間才驗
 
         await ws.accept()
         conn = Connection(ws, user_id, name, scene)

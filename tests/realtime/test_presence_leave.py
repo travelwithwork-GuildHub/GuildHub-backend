@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import uuid
 
 from app import room_token
 from tools.fake_client import FakeClient
@@ -87,10 +88,13 @@ async def test_presence_leave_removes_the_player_from_later_snapshots(server):
 async def test_presence_leave_does_not_cross_scenes(server):
     """規格書 §3.1：房間裡的人離線，大廳不該收到任何東西。"""
     in_lobby = FakeClient("大廳的", port=server)
+    room_user = str(uuid.uuid4())
     in_room = FakeClient(
         "房間的",
         scene="room:spike",
-        token=room_token.issue("spike", "房間的"),  # §6.2：進房間要帶票
+        # §6.2：進房間要帶票，而且要是簽給自己的（[R31]）
+        token=room_token.issue("spike", room_user),
+        session_user=room_user,
         port=server,
     )
     await in_lobby.connect()

@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import uuid
 
 from app import room_token
 from tools.fake_client import FakeClient
@@ -18,11 +19,17 @@ def chats(client) -> list[str]:
 
 
 def room_client(name: str, project_id: str, port: int) -> FakeClient:
-    """進房間一定要帶 room_token（§6.2 / [R31]）。"""
+    """進房間要帶 room_token，而且要是簽給自己的（§6.2 / [R31]）。
+
+    [R31] 會比對 token 的簽發對象與連線者，所以房間連線必須有身分 ——
+    匿名連線拿到隨機 uuid，對不上任何一張票。
+    """
+    user_id = str(uuid.uuid4())
     return FakeClient(
         name,
         scene=f"room:{project_id}",
-        token=room_token.issue(project_id, name),
+        token=room_token.issue(project_id, user_id),
+        session_user=user_id,
         port=port,
     )
 
