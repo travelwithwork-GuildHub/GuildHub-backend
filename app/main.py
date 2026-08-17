@@ -21,8 +21,8 @@ log = logging.getLogger("guildhub")
 # 規格書 §2.2：40 人的狀態全放記憶體對單一 Python process 是輕負載。
 scenes = SceneRegistry()
 presence = PresenceStore()
-manager = ConnectionManager(scenes, presence)
 broadcaster = Broadcaster(scenes, presence)
+manager = ConnectionManager(scenes, presence, broadcaster)
 
 
 @contextlib.asynccontextmanager
@@ -91,4 +91,4 @@ async def ws_endpoint(ws: WebSocket, scene: str = "lobby", token: str | None = N
     except WebSocketDisconnect:
         pass
     finally:
-        manager.forget(conn)
+        await manager.disconnect(conn)

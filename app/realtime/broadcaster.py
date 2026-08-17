@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import time
 
 from app.realtime import protocol
 from app.realtime.presence import PresenceStore
@@ -33,9 +34,26 @@ class Broadcaster:
     # ------------------------------------------------------------ [R19] 迴圈
 
     async def tick_loop(self) -> None:
-        """固定 10 Hz。用 sleep(0.1) 而不是 sleep(0) 忙迴圈。"""
+        """固定 10 Hz。用 sleep 等待，不是 sleep(0) 忙迴圈。
+
+        不能只寫 `await asyncio.sleep(0.1)`：asyncio 判斷計時器到期時會扣掉
+        時鐘解析度（Windows 約 15.6 ms），事件迴圈忙碌時 sleep 會提早醒來，
+        實測變成 94 ms 一次 ≈ 10.6 Hz。10 Hz 是規格書 §3.2 的硬上限，不是
+        目標值，所以這裡以單調時鐘對齊：每個 tick 的時間點事先算好，提早
+        醒來就補睡到真正到期。
+        """
+        next_at = time.monotonic() + TICK_SECONDS
         while True:
-            await asyncio.sleep(TICK_SECONDS)
+            now = time.monotonic()
+            while now < next_at:
+                await asyncio.sleep(next_at - now)
+                now = time.monotonic()
+
+            next_at += TICK_SECONDS
+            if next_at <= now:
+                # 落後超過一個 tick（GC 停頓之類）就重新對齊，不補送漏掉的
+                next_at = now + TICK_SECONDS
+
             try:
                 await self.tick()
             except Exception:  # noqa: BLE001
