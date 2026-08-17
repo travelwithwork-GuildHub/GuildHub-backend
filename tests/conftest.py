@@ -7,17 +7,60 @@ ASGI 測試客戶端就驗不到節流與封包量（任務表 [R17] [R18]：必
 import socket
 import threading
 import time
+from pathlib import Path
 
+import asyncpg
+import httpx
 import pytest
 import uvicorn
 
+from app import config, db as db_module
 from app.main import app
+
+SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
 
 
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+@pytest.fixture
+async def db():
+    """[P01] 每個測試拿到一份乾淨 schema。
+
+    刻意不提供 SQLite 後備：SQLite 的約束行為與 PostgreSQL 不同（enum、
+    text[]、deferrable、check 的細節都不一樣），用它會讓 §4.1 的四個不變式
+    假綠 —— 那正是這些測試唯一要證明的東西（任務表 [P01]）。
+
+    沒有可用的 PostgreSQL 時直接 skip 並說明原因，不會安靜地通過。
+    """
+    try:
+        pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=5)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"沒有可用的 PostgreSQL（[D01] 尚未完成）：{exc}")
+
+    schema = (SQL_DIR / "001_schema.sql").read_text(encoding="utf-8")
+    async with pool.acquire() as conn:
+        # 整個 schema 砍掉重建，比逐表 truncate 更難留下殘留狀態
+        await conn.execute("drop schema public cascade; create schema public;")
+        await conn.execute(schema)
+
+    db_module.set_pool(pool)
+    try:
+        yield pool
+    finally:
+        db_module.set_pool(None)
+        await pool.close()
+
+
+@pytest.fixture
+async def api(db):
+    """[P02] 對 FastAPI app 發請求，不啟真 server。"""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
 def _boot(**kwargs) -> tuple[int, uvicorn.Server, threading.Thread]:
