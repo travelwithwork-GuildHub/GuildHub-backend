@@ -55,4 +55,13 @@ async def require_room_token(
 
     if claims.project_id != str(project_id):
         raise HTTPException(status_code=403, detail="token 不屬於這個房間")
+
+    # token 裡就帶著簽發對象，比一下沒有代價。
+    #
+    # 目前沒有路徑走得到這個分支 —— token 只由 /enter 簽發進自己的 session，
+    # 拿到的一定是自己的。它防的是未來：哪天有人加了「從 header 或 body 收
+    # room token」的端點，少了這一行就會變成可以借用別人的票。
+    if claims.user_id != str(me):
+        raise HTTPException(status_code=403, detail="token 不屬於你")
+
     return project_id

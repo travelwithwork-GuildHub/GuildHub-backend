@@ -205,21 +205,43 @@ returning ...
 - [ ] `row is None` 的診斷查詢只在失敗之後才跑，不在成功路徑上
 - [ ] 400（房間沒這格）與 409（這格有人／你已有位子）分得清楚
 
-### 3.2 `read_at` 永遠是 null
+### 3.2 `read_at` 永遠是 null ✅ P1 裁決：先留著
 
-`messages.read_at` 在規格書 §4 的 schema 裡，但**沒有任何程式路徑寫它**，
-任務表也沒有對應任務。目前它是一個永遠為 null 的欄位。
+`messages.read_at` 在規格書 §4 的 schema 裡，但沒有任何程式路徑寫它，任務表
+也沒有對應任務。
 
-兩種可能：已讀功能被砍了但欄位留著（那就是 schema 裡的死欄位），或是漏了。
-守則 §1 規則 3 說不得建立 §4 之外的欄位，但沒說 §4 內的欄位一定要用到。
+**P1 裁決：欄位保留，不實作已讀功能。** 記在這裡是為了讓下一個看到這個欄位
+的人知道它是刻意空著的，不是漏掉的 —— 不需要再問一次，也不要順手補一個
+「標記已讀」端點（守則 §3：即使看起來順手就能加也不要加）。
 
-### 3.3 room token 沒有比對持有人
+### 3.3 room token 比對持有人 ✅ 已依 P1 裁決加上
 
-[app/deps.py:46](app/deps.py) 的 `require_room_token` 驗了
-`claims.project_id == project_id`，但沒有驗 `claims.user_id == 目前登入者`。
+[app/deps.py](app/deps.py) 的 `require_room_token` 原本只驗
+`claims.project_id`，現在同時驗 `claims.user_id == 目前登入者`，不符回 403。
 
-實務上影響很小 —— token 只由 `/enter` 寫進自己的 session。但既然 token 裡
-就有 `user_id`，多比一行沒有代價。要加的話請說，我不自行改必審項。
+測試在 [tests/test_room_token_binding.py](tests/test_room_token_binding.py)，
+7 個，**不需要資料庫，現在就是綠的**。
+
+老實說：**今天沒有任何路徑走得到這個分支。** token 只由 `/enter` 簽發並直接
+寫進簽發對象自己的 session，所以拿到的一定是自己的。這一行防的是未來 ——
+哪天有人加了「從 header 或 body 收 room token」的端點，少了它就會變成可以
+借用別人的票。
+
+#### 還沒動的一半：WebSocket 握手 ⚠ 需要你決定
+
+[app/realtime/manager.py](app/realtime/manager.py) 的
+`authenticate_handshake` 也驗 room token，但**只驗 project_id，沒驗
+user_id**。我沒有一併改，理由是這會改變 REST 之外的行為，而你的指示是針對
+我在 §3.3 提的那一處：
+
+| 考量 | 傾向 |
+|---|---|
+| 一致性：同一種 token 兩個地方驗法不同，日後會有人踩到 | 該加 |
+| 安全性：房間是共享密碼制（§6.2 不做成員制），知道密碼的人本來就能簽自己的票 | 加了幾乎不增加防護 |
+| 代價：會讓 5 個目前綠的測試變紅（它們用任意字串當 user 簽 token） | 要一併改測試 |
+| 副作用：等於強制「進房間一定要先登入」—— 這其實符合 §6.2 | 中性偏好 |
+
+一行程式碼 + 改 5 個測試。要加的話說一聲。
 
 ---
 
