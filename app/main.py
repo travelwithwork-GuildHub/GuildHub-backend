@@ -9,6 +9,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import config, db
+from app.api import auth, messages, profiles, projects, rooms, seats
 from app.realtime import protocol
 from app.realtime.broadcaster import Broadcaster
 from app.realtime.manager import ConnectionManager
@@ -42,6 +43,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GuildHub", version="0.1", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=config.SESSION_SECRET)
+
+# [P23] 路由組裝。只掛附錄 B 列出的端點，一個不多 —— tests/test_contract.py
+# 會擋下任何多出來的路由。
+app.include_router(auth.router)
+app.include_router(profiles.router)
+app.include_router(projects.router)
+app.include_router(seats.router)
+app.include_router(messages.router)
+app.include_router(rooms.router)
 
 
 @app.get("/health")
