@@ -1,0 +1,48 @@
+# [D02] systemd unit。規格書 §2.2：即時層需要常駐 process，不適合 serverless。
+#
+# 安裝：
+#   sudo cp deploy/guildhub.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now guildhub
+#
+# 沒有 Docker（守則 §2：已於 WBS v0.2 砍除，直接 VM + systemd）。
+
+[Unit]
+Description=GuildHub 後端（同一 process 提供 REST 與 WebSocket）
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=guildhub
+Group=guildhub
+WorkingDirectory=/srv/guildhub
+EnvironmentFile=/srv/guildhub/.env
+
+# ⚠ 絕對不要加 --workers。
+#
+# 即時層的全部狀態都在記憶體裡（規格書 §2.2、守則 §1 規則 5）：SceneRegistry、
+# PresenceStore、Broadcaster 都是 app.main 的 module-level 物件。多開一個
+# worker 就是多一份互相看不見的世界 —— 大廳裡的兩個人會隨機分到不同 process，
+# 然後看不到彼此，而且不會有任何錯誤訊息。
+#
+# 40 人的狀態對單一 Python process 是輕負載（實測 40 連線 60.7 MB），
+# 不需要也不可以水平切。
+ExecStart=/srv/guildhub/.venv/bin/python -m uvicorn app.main:app \
+    --host 0.0.0.0 --port 8000 \
+    --ws-ping-interval 20 --ws-ping-timeout 20
+
+# 即時層斷線等於所有人被踢出大廳，所以掛掉一定要自己爬起來
+Restart=always
+RestartSec=3
+
+# 重啟時先讓現有連線收到 close frame，前端才知道要重連
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=guildhub
+
+[Install]
+WantedBy=multi-user.target
