@@ -86,8 +86,16 @@ async def ws_endpoint(ws: WebSocket, scene: str = "lobby", token: str | None = N
             if isinstance(msg, protocol.Move):
                 presence.set_position(user_id, msg.x, msg.y, msg.f)
             elif isinstance(msg, protocol.StatusIn):
-                with contextlib.suppress(ValueError):
+                try:
                     presence.set_status_text(user_id, msg.text)
+                except ValueError:
+                    continue  # 超過 12 字（§3.3），丟棄不回錯
+                await broadcaster.broadcast(
+                    conn.scene, protocol.status_out(user_id, msg.text)
+                )
+            elif isinstance(msg, protocol.ChatIn):
+                # §3.4：純廣播，不落地。這裡沒有任何寫入動作是刻意的。
+                await broadcaster.relay_chat(conn.scene, user_id, name, msg.body)
     except WebSocketDisconnect:
         pass
     finally:
