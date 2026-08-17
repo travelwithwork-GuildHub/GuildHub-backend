@@ -46,6 +46,14 @@ async def update_me(
         row = await db.pool().fetchrow("select * from profiles where id = $1", user_id)
         return ProfileOut(**dict(row))
 
+    # 欄位名會被拼進 SQL 字串（值仍走參數化）。名稱只可能來自 ProfileUpdate
+    # 宣告過的欄位，但這裡明確再擋一次 —— 日後若有人改成從 request 直接讀
+    # 欄位名，這行會先炸掉，而不是變成注入點。
+    allowed = set(ProfileUpdate.model_fields)
+    unexpected = set(fields) - allowed
+    if unexpected:
+        raise HTTPException(status_code=422, detail=f"未知欄位：{sorted(unexpected)}")
+
     assignments = ", ".join(f"{name} = ${i + 2}" for i, name in enumerate(fields))
     row = await db.pool().fetchrow(
         f"update profiles set {assignments}, updated_at = now() "
