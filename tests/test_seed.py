@@ -20,15 +20,20 @@ def statements() -> list[str]:
 
 
 def rows_of(table: str) -> list[str]:
-    """撈出某個 insert 的 values 區塊，逐列回傳。"""
+    """撈出某個表的全部 insert 列。
+
+    要累加所有 insert 語句，不能只取第一個 —— 假資料分成好幾段寫（[P10] 的
+    最小集合、[D04] 的補充），只看第一段會少算一半。
+    """
+    rows: list[str] = []
     for stmt in statements():
         if not re.match(rf"insert\s+into\s+{table}\b", stmt, re.I):
             continue
         values = stmt[re.search(r"\bvalues\b", stmt, re.I).end():]
         values = re.sub(r"on\s+conflict.*$", "", values, flags=re.I | re.S)
         # 以「) , (」為界切列，避免被字串裡的逗號騙到
-        return [m.group(1) for m in re.finditer(r"\(((?:[^()']|'[^']*')*)\)", values)]
-    return []
+        rows += [m.group(1) for m in re.finditer(r"\(((?:[^()']|'[^']*')*)\)", values)]
+    return rows
 
 
 def uuids_in(text: str) -> list[str]:
