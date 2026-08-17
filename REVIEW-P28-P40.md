@@ -1,0 +1,225 @@
+# [P28] 與 [P40] review 重點
+
+> 對應任務表 [G2]：Agent 產出 review，[P28] [P40] 為必審項。
+> 這兩項之所以必審，不是因為程式難，是因為**寫錯的版本會通過所有直覺的測試**。
+
+---
+
+## 0. 五分鐘版
+
+如果只有五分鐘，做這三件事：
+
+```bash
+grep -n "fetch_all\|for r in rows if\|seat_taken" app/api/messages.py app/api/seats.py
+```
+
+會有三筆命中，**而且應該只有三筆，全部落在行號 10 以內**：
+
+```
+app/api/messages.py:9      rows = await fetch_all_messages()
+app/api/messages.py:10     return [r for r in rows if r.sender_id == me]
+app/api/seats.py:8         if not await seat_taken(project_id, seat_index):
+```
+
+這三行都在檔案開頭的 docstring 裡，是**刻意抄在那裡的反例**——把錯誤寫法
+放在正確寫法正上方，日後改這兩個檔案的人一定會先讀到。真正的程式碼從
+`messages.py:39` 與 `seats.py:43` 才開始。
+
+若有任何一筆命中落在那之後，就是真的寫錯了。接著：
+
+```bash
+sed -n '73,81p' app/api/messages.py    # [P28] WHERE 是否在 SQL 內
+sed -n '59,75p' app/api/seats.py       # [P40] 是否 INSERT 後捕捉，而非先查再寫
+```
+
+然後看本文件 §3 的三個未決問題 —— 那才是真正需要你裁決的地方。
+
+**注意：這兩份實作都還沒在真的 PostgreSQL 上跑過（[D01] 未完成）。**
+下面所有「測試會證明」的敘述，目前都是「測試已寫好，等資料庫」。
+
+---
+
+## 1. [P28] `MessageService.list_for_user`
+
+📄 [app/api/messages.py:63](app/api/messages.py) — 12 行
+
+### 要證明的是什麼
+
+規格書 §4.3：**站內信是全案唯一有實質洩漏風險的資源**，其查詢必須在 SQL 層
+帶上主體條件，不依賴應用層過濾。
+
+### 錯的版本
+
+```python
+rows = await fetch_all_messages()
+return [r for r in rows if r.sender_id == me]
+```
+
+這個版本**在一般測試裡結果完全正確**。它有兩個問題：
+
+1. 分頁先套用在「全部」上再過濾 —— 別人的信多到塞滿一頁時，你會看到空清單
+2. 任何一次重構只要漏掉那行 list comprehension，全站私訊一次外洩
+
+### 這份實作
+
+```sql
+select * from messages
+where (sender_id = $1 or recipient_id = $1)
+order by created_at desc limit $2 offset $3
+```
+
+條件、排序、分頁全部在同一句 SQL 內，Python 端只做 `MessageOut(**dict(r))`。
+
+### 請確認
+
+- [ ] `where` 子句裡有 `sender_id = $1 or recipient_id = $1`，且 `$1` 來自
+      `Depends(get_current_user)`，不是來自 query string 或 body
+- [ ] `limit` / `offset` 在同一句 SQL 內，不是 Python 切片
+- [ ] 回傳前沒有任何 `if`／`filter`／list comprehension 的條件判斷
+- [ ] 收件匣同時含寄件與收件是**刻意的**（§3 原則 3：對話隔音，收件匣不隔音）
+
+### 怎麼驗（[D01] 之後）
+
+```bash
+.venv/bin/python -m pytest tests/test_messages.py -q
+```
+
+其中 `test_message_isolation_survives_paging` 是專門設計來抓錯誤寫法的：先讓
+兩個無關的人互寄 30 封，再讓 A 寄一封給 B。正確實作讓 B 看到那一封；「取全部
+再過濾」的版本會讓 B 看到**空清單**。
+
+只寄一兩封的測試分不出這兩種寫法 —— 這是它們唯一會給出不同答案的情境。
+
+### 我的信心邊界
+
+- **高**：隔離邏輯本身。條件在 SQL 內，沒有繞過的路徑
+- **中**：`select *` 依賴 messages 的欄位與 `MessageOut` 完全一致。這件事有
+  `tests/test_schema_consistency.py` 機械化盯著，但它盯的是欄位名，不是型別
+- **未涵蓋**：沒有任何測試模擬「同時有大量寄件者」的併發讀取。以本案的量級
+  （一天數十到數百筆）不構成風險
+
+---
+
+## 2. [P40] `SeatService.claim`
+
+📄 [app/api/seats.py:43](app/api/seats.py) — 約 20 行
+
+### 要證明的是什麼
+
+規格書 §4.1：**不變式寫在資料庫，因為應用層會有 bug，約束不會。**
+
+### 錯的版本
+
+```python
+if not await seat_taken(project_id, seat_index):
+    await insert_seat(...)
+```
+
+先查再寫之所以錯，不是因為機率低，是因為**它在單機測試裡永遠是對的**。
+兩個請求要真的同時到達才會露出來，而那正是發表當天會發生的事。
+
+### 這份實作
+
+沒有 `SELECT`，沒有應用層的鎖。直接 `INSERT`，讓兩個約束說話：
+
+| 約束 | 擋住什麼 | 轉成 |
+|---|---|---|
+| `primary key (project_id, seat_index)` | 一格兩人 | 409 |
+| `unique (project_id, user_id)` | 一人兩格 | 409 |
+| `check seat_in_range` | index 不在 0–7 | 400 |
+| `foreign key project_id` | 專案不存在 | 404 |
+
+### 請確認
+
+- [ ] `try` 區塊裡**只有一句** `insert`，前面沒有任何 `select`
+- [ ] 捕捉的是 `asyncpg.UniqueViolationError`，不是通用 `Exception`
+- [ ] 沒有 `SELECT ... FOR UPDATE`、沒有 advisory lock、沒有 `asyncio.Lock`
+- [ ] 座位滿即房間滿，沒有另寫容量判斷（§6.3）—— **但請看 §3.1 的問題**
+
+### 怎麼驗（[D01] 之後）
+
+```bash
+.venv/bin/python -m pytest tests/test_seats.py -q
+```
+
+`test_seat_race_exactly_one_winner` 讓八個各自登入、各自持有 room token 的
+client 用 `asyncio.gather` 同時打同一格，斷言恰好一個 201、七個 409，且資料庫
+裡只有一列。
+
+另外兩層防假綠：
+
+- `test_seat_race_different_seats_all_succeed` —— 否則「一律回 409」也會通過
+- `test_seat_race_at_the_database_level` —— 繞過整個應用層直接以並行連線撞
+  資料庫，證明保護來自約束本身而不是來自 FastAPI
+
+### 我的信心邊界
+
+- **高**：一格一人、一人一格。這兩條由約束保證，我的程式碼只負責翻譯錯誤碼
+- **低**：**兩種 409 的區分方式**。程式用
+  `"user_id" in exc.constraint_name` 判斷是 PK 還是 unique 衝突，而這依賴
+  PostgreSQL 自動產生的約束名稱（`seats_pkey` vs
+  `seats_project_id_user_id_key`）。若有人日後替約束改名，兩則訊息會悄悄對調
+  —— **狀態碼仍然正確，只有文案會錯**。這是我在這份實作裡最不喜歡的一行
+- **未涵蓋**：座位數上限（見 §3.1）
+
+---
+
+## 3. 三個我發現但沒有自行決定的問題
+
+守則 §1 規則 7：遇到規格書未定義的情況，停下來提問，不要自行補完。
+
+### 3.1 `seat_count` 目前完全沒有被強制 ⚠ 最需要你看的一項
+
+規格書 §6.3：
+
+> **房間人數上限 = 座位數（預設 4）**，座位滿即房間滿，不需另寫容量判斷。
+
+**這個不變式目前不成立。** `seat_index` 只被 `seat_in_range`（0–7）限制，
+沒有任何地方檢查 `seat_index < projects.seat_count`：
+
+```
+seat_count = 2 的房間，POST {"seat_index": 7} 會成功。
+```
+
+於是「座位滿即房間滿」不成立 —— 房間可以塞進 8 個人。
+
+這條約束跨兩張表，PostgreSQL 的 check 寫不出來（需要 trigger 或
+`seat_count` 冗餘到 seats）。三個選項：
+
+| 選項 | 代價 |
+|---|---|
+| 應用層檢查 | 違反「不變式寫在資料庫」，且是先查再寫 |
+| trigger | 資料庫多一個看不見的執行點 |
+| 接受現狀，由前端只顯示 `seat_count` 個座位 | 惡意或手滑的請求擋不住 |
+
+我沒有自行選。這是規格書自己的內部落差，需要你裁決。
+
+### 3.2 `read_at` 永遠是 null
+
+`messages.read_at` 在規格書 §4 的 schema 裡，但**沒有任何程式路徑寫它**，
+任務表也沒有對應任務。目前它是一個永遠為 null 的欄位。
+
+兩種可能：已讀功能被砍了但欄位留著（那就是 schema 裡的死欄位），或是漏了。
+守則 §1 規則 3 說不得建立 §4 之外的欄位，但沒說 §4 內的欄位一定要用到。
+
+### 3.3 room token 沒有比對持有人
+
+[app/deps.py:46](app/deps.py) 的 `require_room_token` 驗了
+`claims.project_id == project_id`，但沒有驗 `claims.user_id == 目前登入者`。
+
+實務上影響很小 —— token 只由 `/enter` 寫進自己的 session。但既然 token 裡
+就有 `user_id`，多比一行沒有代價。要加的話請說，我不自行改必審項。
+
+---
+
+## 4. 這兩項的測試涵蓋一覽
+
+| | 已寫 | 已跑過 |
+|---|---|---|
+| [P28] 隔離、分頁洩漏、收件匣不隔音、自寄被擋 | 8 個 | ❌ 等 [D01] |
+| [P40] 八人競爭、不同格全成功、一人兩格、DB 層競爭、門禁 | 9 個 | ❌ 等 [D01] |
+| 欄位名一致性（schema ↔ models ↔ SQL） | 19 個 | ✅ 綠 |
+| 端點不多不少、未登入全 401 | 24 個 | ✅ 綠 |
+
+**第一次跑會紅一片是正常的** —— 那 52 個測試從沒執行過。但欄位名層級的錯誤
+已被靜態檢查掃過，所以紅的應該是邏輯，不是打字。
