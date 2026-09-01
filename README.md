@@ -241,6 +241,12 @@ sql/001_schema.sql  →  app/models.py  →  OpenAPI（自動產生）  →  P2
 
 ---
 
+## 授權
+
+[MIT](LICENSE)。
+
+---
+
 ## 這份 repo 之外
 
 規格書（`GuildHub-架構與規格書v0.1.md`）、Agent 執行守則與任務追蹤表放在專案
