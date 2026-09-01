@@ -1,0 +1,22 @@
+# 相依套件。版本釘死在開發機實測過的組合（Python 3.11）。
+#
+# 安裝：
+#     python -m venv .venv
+#     .venv/Scripts/python.exe -m pip install -r requirements.txt   # Windows
+#     .venv/bin/python -m pip install -r requirements.txt           # Linux / macOS
+#
+# 測試相依（pytest 系列、httpx）刻意放在同一份，不另外開 requirements-dev.txt：
+# deploy/deploy.sh 在重啟服務之前會在 VM 上跑一次 pytest，那是唯一的閘門
+# （沒有 CI），所以正式機也需要這幾個套件。
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+asyncpg==0.31.0
+itsdangerous==2.2.0
+python-dotenv==1.2.2
+websockets==17.0.1
+
+# 測試
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
