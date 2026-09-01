@@ -6,6 +6,7 @@ import uuid
 from urllib.parse import unquote
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import config, db
@@ -43,6 +44,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GuildHub", version="0.1", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=config.SESSION_SECRET)
+
+# CORS 在 Session 之後掛，因此包在更外層（add_middleware 是往外加的）。順序
+# 有影響：preflight 的 OPTIONS 不帶 cookie，必須在碰到 session 之前就被回掉。
+#
+# allow_credentials=True 是必要的 —— 身分走 session cookie，沒有它瀏覽器不會
+# 送 cookie，每個請求都會是 401。它同時使得 allow_origins 不能是 "*"（見
+# config.py 的檢查）。
+#
+# 前後端同源部署時 CORS_ORIGINS 會是空的，這個 middleware 就不放行任何跨源
+# 請求 —— 同源請求本來就不經過它，行為正確。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # [P23] 路由組裝。只掛附錄 B 列出的端點，一個不多 —— tests/test_contract.py
 # 會擋下任何多出來的路由。
