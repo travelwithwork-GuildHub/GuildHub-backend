@@ -22,6 +22,9 @@ systemd，沒有 Docker、沒有 CI（三人專案、五週，人講比機器擋
 [API-前端整合指南.md](API-前端整合指南.md)（`/docs` 產不出來的部分——session
 流程、WS 協定、錯誤碼語意）。
 
+要動這個 repo 的程式之前先讀 [CLAUDE.md](CLAUDE.md)：規格裡有不少反直覺的
+決定，照常識寫在這裡經常就是錯的。
+
 ---
 
 ## 跑起來
@@ -238,6 +241,15 @@ sql/001_schema.sql  →  app/models.py  →  OpenAPI（自動產生）  →  P2
 計時器到期時會扣掉時鐘解析度（Windows 約 15.6 ms），事件迴圈忙碌時會提早醒來，
 實測變成 94 ms 一次 ≈ 10.6 Hz。10 Hz 是硬上限不是目標值，所以 tick 迴圈以單調
 時鐘對齊，提早醒來就補睡到真正到期。
+
+---
+
+## 共創者
+
+- [@fergusKe](https://github.com/fergusKe)
+- [@harperzzzzz](https://github.com/harperzzzzz)
+- [@hyc7180-create](https://github.com/hyc7180-create)
+- [@willylee714-coder](https://github.com/willylee714-coder)
 
 ---
 
