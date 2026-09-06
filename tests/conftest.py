@@ -2,8 +2,12 @@
 
 軌 R 的測試需要一個真的 server —— fake_client 走真實 WebSocket，用 mock 或
 ASGI 測試客戶端就驗不到節流與封包量（任務表 [R17] [R18]：必須實際計數封包）。
+
+測試連到哪個資料庫由 `TEST_DATABASE_URL` 決定，見下方〈為什麼不吃
+DATABASE_URL〉。沒設就整批 skip —— **不會退回 `DATABASE_URL`**。
 """
 
+import os
 import socket
 import threading
 import time
@@ -13,11 +17,44 @@ import asyncpg
 import httpx
 import pytest
 import uvicorn
-
-from app import config, db as db_module
-from app.main import app
+from dotenv import dotenv_values
 
 SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+
+# ─────────────────────────────────────────────────────────────────────────
+# 測試連哪個庫
+#
+# 下面的 `db` fixture 對它連到的那個庫下 `drop schema public cascade`。
+# 這是對的 —— 逐表 truncate 會留下殘留狀態。錯的是拿它去砍開發用的那一個庫：
+# 跑一次 pytest，seed 資料就沒了，而且**測試全綠**，沒有任何東西會提醒你。
+#
+# 位址由獨立的 `TEST_DATABASE_URL` 決定，沒設就 skip —— **不退回
+# `DATABASE_URL`**。退回等於把地雷原封不動留在原地，只是多了一層看起來
+# 處理過的樣子。
+#
+#   docker exec guildhub-db psql -U guildhub -d postgres -c "create database guildhub_test owner guildhub;"
+#
+# 覆蓋的方式是**改 `os.environ` 而且在 import app 之前**，不是 import 之後
+# 去改 `config.DATABASE_URL`。理由是 `test_cors.py` 會 `importlib.reload(config)`
+# 來驗「CORS_ORIGINS=* 要在啟動時炸掉」—— reload 會整個重跑 `app/config.py`，
+# 把改在模組屬性上的值打回 `.env` 的開發位址。實測過：單檔跑沒事，整套跑到
+# `test_cors.py` 之後的每個測試都在砍開發庫，而 237 個測試照樣全綠。
+# ─────────────────────────────────────────────────────────────────────────
+
+_ENV = {**dotenv_values(Path(__file__).resolve().parent.parent / ".env"), **os.environ}
+TEST_DATABASE_URL = _ENV.get("TEST_DATABASE_URL")
+
+if TEST_DATABASE_URL and TEST_DATABASE_URL == _ENV.get("DATABASE_URL"):
+    raise RuntimeError(
+        "TEST_DATABASE_URL 不得與 DATABASE_URL 相同 —— 測試會 drop schema，"
+        f"指向同一個庫等於每次跑測試都清空開發資料。目前兩者都是：{TEST_DATABASE_URL}"
+    )
+
+if TEST_DATABASE_URL:
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+
+from app import config, db as db_module  # noqa: E402
+from app.main import app  # noqa: E402
 
 
 def _free_port() -> int:
@@ -30,10 +67,16 @@ def _free_port() -> int:
 def db_unavailable() -> str | None:
     """只探測一次資料庫在不在，回傳失敗原因（在的話回 None）。
 
-    沒有這層的話，[D01] 完成前每個需要資料庫的測試都要各自等一次連線逾時 ——
-    四十幾個測試就是好幾分鐘，慢到大家會開始習慣性跳過整個測試套件。
+    沒有這層的話，每個需要資料庫的測試都要各自等一次連線逾時 —— 四十幾個
+    測試就是好幾分鐘，慢到大家會開始習慣性跳過整個測試套件。
     """
     import asyncio
+
+    if not TEST_DATABASE_URL:
+        return (
+            "沒有設 TEST_DATABASE_URL。測試會 drop schema，所以必須指定一個"
+            "專用的庫；刻意不退回 DATABASE_URL，那會清空開發資料。"
+        )
 
     async def probe() -> str | None:
         try:
@@ -60,7 +103,21 @@ async def db(db_unavailable):
     沒有可用的 PostgreSQL 時直接 skip 並說明原因，不會安靜地通過。
     """
     if db_unavailable:
-        pytest.skip(f"沒有可用的 PostgreSQL（[D01] 尚未完成）：{db_unavailable}")
+        pytest.skip(f"沒有可用的測試資料庫：{db_unavailable}")
+
+    # 要砍東西之前先確認砍的是測試庫。
+    #
+    # 這道檢查不是多餘的：`config.DATABASE_URL` 在測試過程中會被
+    # `importlib.reload(config)` 改掉（見上面）。沒有這一行的話，那種改動的
+    # 症狀是「開發資料悄悄消失而測試全綠」—— 要好幾天才會有人發現，而且
+    # 那時已經分不出是誰砍的。
+    if config.DATABASE_URL != TEST_DATABASE_URL:
+        raise RuntimeError(
+            "測試要 drop schema，但 app.config 目前指向的不是測試庫："
+            f"config.DATABASE_URL={config.DATABASE_URL}，"
+            f"TEST_DATABASE_URL={TEST_DATABASE_URL}。"
+            "有東西在測試過程中重新載入了 app.config（例如 importlib.reload）。"
+        )
 
     pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=10)
 

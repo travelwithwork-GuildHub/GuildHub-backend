@@ -49,11 +49,12 @@ WS 協定的權威版本是 `app/realtime/protocol.py`（可執行的那份）�
 
 ### 環境變數
 
-`.env` 不進版控，範本是 `.env.example`。只有四個值：
+`.env` 不進版控，範本是 `.env.example`。只有五個值：
 
 | 變數 | 用途 | 預設 |
 |---|---|---|
 | `DATABASE_URL` | PostgreSQL 連線字串 | `postgresql://guildhub:guildhub@localhost:5432/guildhub` |
+| `TEST_DATABASE_URL` | **測試專用**的連線字串。測試會 `drop schema`，所以跟上面那個分開；沒設的話需要資料庫的測試會 skip，**不會退回 `DATABASE_URL`** | `postgresql://guildhub:guildhub@localhost:5432/guildhub_test` |
 | `SESSION_SECRET` | session cookie 的簽章金鑰。**上線前務必換掉** | `change-me` |
 | `ROOM_TOKEN_SECRET` | room token 的簽章金鑰，TTL 8 小時。**上線前務必換掉** | `change-me` |
 | `CORS_ORIGINS` | 允許帶 cookie 跨源的前端來源，逗號分隔。不接受 `*`（見下方 CORS 說明），前後端同源時留空 | `http://localhost:5173,http://localhost:3000` |
@@ -69,6 +70,19 @@ python tools/apply_sql.py --seed   # 連 002_seed.sql 的假資料一起
 python tools/apply_sql.py --reset  # 先砍掉 public schema 再重建（會刪光資料）
 ```
 
+本機要一台 PostgreSQL。部署是單一 VM 上的原生服務（見〈部署〉），但開發機
+用容器最省事——**兩個庫**，`guildhub` 給開發、`guildhub_test` 給測試：
+
+```bash
+docker run -d --name guildhub-db --restart unless-stopped   -e POSTGRES_USER=guildhub -e POSTGRES_PASSWORD=guildhub -e POSTGRES_DB=guildhub   -p 127.0.0.1:5432:5432 -v guildhub-pgdata:/var/lib/postgresql/data postgres:16
+
+docker exec guildhub-db psql -U guildhub -d postgres   -c "create database guildhub_test owner guildhub;"
+
+python tools/apply_sql.py --seed
+```
+
+只綁 `127.0.0.1`，不對外網開。測試庫不用手動套 schema——每個測試自己重建。
+
 ### 測試
 
 ```bash
@@ -76,8 +90,28 @@ python tools/apply_sql.py --reset  # 先砍掉 public schema 再重建（會刪�
 # .venv/bin/python -m pytest -q         # Linux / macOS
 ```
 
-目前 174 passed、63 skipped。需要 PostgreSQL 的測試在沒有資料庫時會 skip 並
-指名 `[D01]`，不會安靜通過。
+目前 240 passed。需要 PostgreSQL 的測試在沒有測試資料庫時會 skip 並說明原因，
+不會安靜通過。
+
+**測試連的是 `TEST_DATABASE_URL`，不是 `DATABASE_URL`。** `tests/conftest.py`
+的 `db` fixture 對它連到的那個庫下 `drop schema public cascade`——逐表 truncate
+會留下殘留狀態，所以砍掉重建是對的；錯的是拿它去砍開發用的庫。指向同一個庫的
+話，跑一次 `pytest` 開發資料就沒了，而且**測試全綠**，沒有任何東西會提醒你。
+
+三道閘門，每一道都有負向測試證明它會叫：
+
+| 情況 | 結果 |
+|---|---|
+| 沒設 `TEST_DATABASE_URL` | 需要資料庫的測試 skip，**不退回 `DATABASE_URL`** |
+| 兩者設成同一個值 | 收集階段就 `RuntimeError` |
+| 測試中途 `app.config` 被改回開發位址 | `db` fixture 在 drop 之前 `RuntimeError` |
+
+第三道不是多餘的。`test_cors.py` 為了驗「`CORS_ORIGINS=*` 要在啟動時炸掉」
+必須 `importlib.reload(config)`，而 reload 會整個重跑 `app/config.py`——所以
+覆蓋位址是改 `os.environ`（在 import app 之前），不是 import 之後去改
+`config.DATABASE_URL`。後者的症狀是單檔跑正常、整套跑到 `test_cors.py`
+之後就開始砍開發庫，**而且 237 個測試照樣全綠**。`tests/test_db_isolation.py`
+把這件事釘住。
 
 ### 部署
 
