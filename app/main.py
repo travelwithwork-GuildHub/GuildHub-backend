@@ -87,6 +87,10 @@ def _identify(ws: WebSocket) -> tuple[str, str]:
     session = ws.scope.get("session") or {}
     user_id = session.get("user_id")
     if user_id:
+        # 「訪客」在這裡只剩兩種情況：cookie 是這次修好之前簽發的（沒有 name
+        # 那個鍵），或名片被刪了。已登入的人走到這裡拿到「訪客」曾經是常態 ——
+        # POST /api/login 從來沒有寫過 session["name"]，於是世界裡每個人都
+        # 叫「訪客」。修在 app/api/auth.py。
         return user_id, session.get("name") or "訪客"
 
     raw = ws.headers.get("x-fake-name")

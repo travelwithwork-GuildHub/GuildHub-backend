@@ -25,6 +25,15 @@ async def login(payload: LoginIn, request: Request) -> ProfileOut:
         payload.nickname,
     )
     request.session["user_id"] = str(user_id)
+
+    # 世界裡顯示的名字來自 session：main.py 的 _identify() 讀 session["name"]。
+    # 在這一行之前沒有任何地方寫過那個鍵，所以每個人在 3D 世界裡都叫「訪客」
+    # —— 而症狀看起來像前端把名字接錯了。
+    #
+    # 存 row 的值而不是 payload.nickname：名字的來源是資料庫，日後 schema
+    # 若加了正規化或截斷，這裡會跟著對。
+    request.session["name"] = row["display_name"]
+
     return ProfileOut(**dict(row))
 
 

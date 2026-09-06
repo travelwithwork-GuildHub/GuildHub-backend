@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import db
 from app.deps import get_current_user
@@ -33,6 +33,7 @@ async def list_profiles(
 @router.patch("/me", response_model=ProfileOut)
 async def update_me(
     payload: ProfileUpdate,
+    request: Request,
     user_id: uuid.UUID = Depends(get_current_user),
 ) -> ProfileOut:
     """[P15]。未給的欄位不動。
@@ -61,6 +62,13 @@ async def update_me(
         user_id,
         *fields.values(),
     )
+
+    # 改名之後 session 裡那份會過期，而世界裡的名字是從 session 來的 ——
+    # 不同步的話就是同一個 bug 的安靜版本：改完名字，別人看到的還是舊的，
+    # 一路到重新登入為止。
+    if "display_name" in fields:
+        request.session["name"] = row["display_name"]
+
     return ProfileOut(**dict(row))
 
 
