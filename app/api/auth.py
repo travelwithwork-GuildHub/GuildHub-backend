@@ -34,6 +34,11 @@ async def login(payload: LoginIn, request: Request) -> ProfileOut:
     # 若加了正規化或截斷，這裡會跟著對。
     request.session["name"] = row["display_name"]
 
+    # 同一個理由：世界裡的外觀也來自 session。manager.connect() 不傳 avatar
+    # 給 presence.join() 的話會吃到預設值 0 —— 前端把角色外觀做完，別人看到
+    # 的還是同一隻。
+    request.session["avatar_id"] = row["avatar_id"]
+
     return ProfileOut(**dict(row))
 
 

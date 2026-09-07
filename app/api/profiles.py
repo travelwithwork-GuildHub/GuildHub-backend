@@ -68,6 +68,8 @@ async def update_me(
     # 一路到重新登入為止。
     if "display_name" in fields:
         request.session["name"] = row["display_name"]
+    if "avatar_id" in fields:
+        request.session["avatar_id"] = row["avatar_id"]
 
     return ProfileOut(**dict(row))
 

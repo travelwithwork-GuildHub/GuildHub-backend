@@ -46,7 +46,7 @@ async def test_login_writes_the_display_name_into_the_session(login):
 async def test_the_world_sees_the_logged_in_name(login):
     """這是 BE-G02 本身：同一份 session 交給 _identify()，要拿到「阿凱」。"""
     c = await login("阿凱")
-    user_id, name = _identify(_StubWS(session_of(c)))
+    user_id, name, _avatar_id = _identify(_StubWS(session_of(c)))
 
     assert name == "阿凱"
     assert name != "訪客"

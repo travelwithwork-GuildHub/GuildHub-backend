@@ -79,7 +79,13 @@ class ConnectionManager:
             raise InvalidRoomToken("token 不屬於你")
 
     async def connect(
-        self, ws: WebSocket, user_id: str, name: str, scene: str, token: str | None = None
+        self,
+        ws: WebSocket,
+        user_id: str,
+        name: str,
+        scene: str,
+        token: str | None = None,
+        avatar_id: int = 0,
     ) -> Connection:
         """[R16]。驗證全部排在 accept 之前，被拒的連線不會留下任何痕跡。"""
         self.scenes.get_or_create(scene)  # 格式不合直接 ValueError，不 accept
@@ -88,7 +94,9 @@ class ConnectionManager:
         await ws.accept()
         conn = Connection(ws, user_id, name, scene)
 
-        player = self.presence.join(user_id, name=name, scene=scene)
+        player = self.presence.join(
+            user_id, name=name, scene=scene, avatar_id=avatar_id
+        )
         # 此刻自己還不是 scene 成員，所以不會收到自己的 join
         await self.broadcaster.broadcast(
             scene, protocol.presence(join=[player.as_dict()], leave=[])

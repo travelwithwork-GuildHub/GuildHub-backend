@@ -77,7 +77,7 @@ async def health():
     return {"status": "ok"}
 
 
-def _identify(ws: WebSocket) -> tuple[str, str]:
+def _identify(ws: WebSocket) -> tuple[str, str, int]:
     """身分解析。附錄 A.1：身分來自登入時的 session cookie。
 
     沒有 session 時走匿名路徑 —— 規格書 §9：發表日開放現場進場，暱稱即可，
@@ -91,18 +91,20 @@ def _identify(ws: WebSocket) -> tuple[str, str]:
         # 那個鍵），或名片被刪了。已登入的人走到這裡拿到「訪客」曾經是常態 ——
         # POST /api/login 從來沒有寫過 session["name"]，於是世界裡每個人都
         # 叫「訪客」。修在 app/api/auth.py。
-        return user_id, session.get("name") or "訪客"
+        return user_id, session.get("name") or "訪客", session.get("avatar_id") or 0
 
+    # 匿名訪客沒有名片，所以沒有外觀可言 —— 0 在這裡是「預設角色」，
+    # 不是「漏傳」。差別在於已登入的人不該再走到這個 0。
     raw = ws.headers.get("x-fake-name")
-    return str(uuid.uuid4()), (unquote(raw) if raw else "訪客")
+    return str(uuid.uuid4()), (unquote(raw) if raw else "訪客"), 0
 
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, scene: str = "lobby", token: str | None = None):
-    user_id, name = _identify(ws)
+    user_id, name, avatar_id = _identify(ws)
 
     try:
-        conn = await manager.connect(ws, user_id, name, scene, token)
+        conn = await manager.connect(ws, user_id, name, scene, token, avatar_id)
     except (ValueError, InvalidRoomToken) as exc:
         # 尚未 accept，close() 會讓握手直接以 HTTP 403 收場
         log.info("拒絕握手：%s", exc)
