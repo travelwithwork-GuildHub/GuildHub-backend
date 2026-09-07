@@ -23,7 +23,7 @@ import datetime as dt
 import enum
 import uuid
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class ProjectStatus(str, enum.Enum):
@@ -61,9 +61,31 @@ class ProfileUpdate(BaseModel):
 
 
 class LoginIn(BaseModel):
-    """規格書 §9：匿名登入，暱稱即可，不走 OAuth。沒有密碼欄位。"""
+    """規格書 §9：匿名登入，暱稱即可，不走 OAuth。沒有密碼欄位。
 
-    nickname: str
+    兩種模式，剛好給一個：
+
+    - `nickname` —— 建立一張新名片
+    - `resume_token` —— 拿回既有的名片。它就是 `ProfileOut.id`，登入時已經
+      回給前端了，所以不必為它新增任何欄位或端點
+
+    **`resume_token` 不是密碼。** 拿到它的人就是那張名片的人。它解的是「同一
+    個人換裝置、或清掉 cookie 之後回得去」（BE-G01），不是「證明這個身分屬於
+    我」。要後者得做帳號密碼，那會動到 sql/001_schema.sql 與規格書 §9，是另一
+    個決定。
+
+    兩個都給、或都不給，都是 422。刻意不做「兩個都給就以某一邊為準」——
+    那是在兩份互相打架的意圖裡自己挑一邊信，而呼叫端不會知道被挑掉的是哪一個。
+    """
+
+    nickname: str | None = None
+    resume_token: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_mode(self) -> "LoginIn":
+        if (self.nickname is None) == (self.resume_token is None):
+            raise ValueError("nickname 與 resume_token 剛好給一個")
+        return self
 
 
 # ------------------------------------------------------------------ 專案／房間

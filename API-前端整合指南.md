@@ -100,19 +100,53 @@ WebSocket 握手時瀏覽器會自動帶上 cookie，不需要（也無法）手
 
 規格 §9：匿名暱稱登入，**沒有密碼、沒有 OAuth**。
 
+`POST /api/login` 有兩種模式，**body 剛好給一個欄位**，兩個都給或都不給是 422：
+
 ```http
 POST /api/login
-{"nickname": "晨風遊俠"}
+{"nickname": "晨風遊俠"}        # 建一張新名片
 → 200 ProfileOut（同時 Set-Cookie）
+
+POST /api/login
+{"resume_token": "<ProfileOut.id>"}   # 拿回既有的名片
+→ 200 ProfileOut（同時 Set-Cookie）
+→ 404 {"detail":"名片不存在"}          # 名片被刪了，或資料庫重建過
 ```
 
-**⚠️ 每次呼叫 `/api/login` 都會建立一張全新的名片。**
-沒有「用同一個暱稱登回原本的身分」這條路徑 —— `login` 是 `insert`，不是查詢。
-所以：
+**⚠️ 給 `nickname` 的那條路每呼叫一次就建一張全新的名片。**
+沒有「用同一個暱稱登回原本的身分」這條路徑 —— 那條路是 `insert`，不是查詢。
 
-- 前端不要在每次開 app 時無條件呼叫 `/api/login`
-- 正確流程是 **先 `GET /api/me`**，401 才顯示登入畫面
-- 使用者清掉 cookie 等於舊名片變成孤兒，回不去了（發表日的預期行為）
+#### `resume_token` 是什麼、不是什麼
+
+**它就是 `ProfileOut.id`。** 登入成功時已經回給你了，不必另外去要。
+前端把它存進 `localStorage`，清掉 cookie 或換一台電腦時拿它登回來（BE-G01）。
+
+**它不是密碼。** 拿到 token 的人就是那張名片的人，後端不會、也無法分辨。
+它解的是「回得去」，不是「證明這個身分屬於我」—— 後者要帳號密碼，會動到
+schema 與規格 §9，是還沒有做的另一個決定。所以：
+
+- 不要把它放進 URL、query string 或任何會被貼出去的地方
+- 不要拿它當「已驗證身分」的依據去做權限判斷
+
+建議流程：
+
+```js
+// 開 app 時
+let me = await fetch('/api/me', { credentials: 'include' })   // 1. 先問 session
+if (me.status === 401) {
+  const token = localStorage.getItem('guildhub.resume')
+  if (token) {
+    me = await login({ resume_token: token })                 // 2. 再試 token
+    if (me.status === 404) localStorage.removeItem('guildhub.resume')  // 名片沒了
+  }
+}
+// 3. 都不行才顯示登入畫面；登入成功後存起來
+localStorage.setItem('guildhub.resume', profile.id)
+```
+
+- 前端不要在每次開 app 時無條件呼叫 `/api/login`（那會一直長出新名片）
+- 正確順序是 **`GET /api/me` → `resume_token` → 登入畫面**
+- 沒存 token 又清掉 cookie，舊名片還是變孤兒 —— 這條沒有變
 
 ### 3.3 未登入
 
@@ -166,7 +200,7 @@ FastAPI 標準格式：
 
 | Method | Path | 說明 |
 |---|---|---|
-| POST | `/api/login` | body `{nickname}` → `ProfileOut`；**每次都建新名片**（見 §3.2） |
+| POST | `/api/login` | body `{nickname}` **或** `{resume_token}`，剛好給一個 → `ProfileOut`。給 `nickname` 每次都建新名片；給 `resume_token` 拿回既有名片，找不到 404（見 §3.2） |
 | GET | `/api/me` | → `ProfileOut`；未登入 401 |
 
 ### 5.2 人才看板

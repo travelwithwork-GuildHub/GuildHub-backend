@@ -21,10 +21,17 @@ async def test_auth_login_then_me_returns_myself(db, api):
 
 
 async def test_auth_login_has_no_password_field(db, api):
-    """規格書 §9：暱稱即可，不走 OAuth。守則 §3：禁止密碼欄位。"""
+    """規格書 §9：暱稱即可，不走 OAuth。守則 §3：禁止密碼欄位。
+
+    BE-G01 的裁決（9/7）加進了 resume_token，所以欄位集合不再只有一個。
+    它不是密碼 —— 拿到它的人就是那張名片的人，後端不會也無法分辨 —— 但這條
+    測試要擋的東西沒有變，所以下面第二條直接對「密碼」斷言，不再靠欄位數量
+    間接擋。第一條仍然是精確集合：往後再多一個欄位一樣會紅，一樣要有人裁決。
+    """
     from app.models import LoginIn
 
-    assert set(LoginIn.model_fields) == {"nickname"}
+    assert set(LoginIn.model_fields) == {"nickname", "resume_token"}
+    assert not [f for f in LoginIn.model_fields if "password" in f or "secret" in f]
 
 
 async def test_auth_two_logins_are_two_people(db, login):
