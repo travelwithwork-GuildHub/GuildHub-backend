@@ -4,10 +4,6 @@
 的狀態：有房無專案、有專案無房、貼文已下架但房間沒開、房間釋放了但專案還在。
 """
 
-import base64
-import hashlib
-import hmac
-import os
 import random
 import uuid
 
@@ -16,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import db, room_token
 from app.deps import get_current_user, require_owner
+from app.passwords import hash_password, verify_password
 from app.models import (
     EnterIn,
     EnterOut,
@@ -39,33 +36,6 @@ _COLUMNS = (
     "id, owner_id, title, body, needed_skills, status, room_template, "
     "seat_count, expires_at, updated_at"
 )
-
-
-# ------------------------------------------------------------------ 密碼雜湊
-#
-# 用 stdlib 的 scrypt，不引入 passlib／bcrypt：房間密碼是共享密碼，不是帳號
-# 密碼（§6.2 不做成員制），為它加一個相依套件不划算。
-
-
-def hash_password(password: str) -> str:
-    salt = os.urandom(16)
-    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
-    return f"scrypt${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
-
-
-def verify_password(password: str, stored: str | None) -> bool:
-    if not stored:
-        return False
-    try:
-        algo, salt_b64, digest_b64 = stored.split("$")
-        if algo != "scrypt":
-            return False
-        salt = base64.b64decode(salt_b64)
-        expected = base64.b64decode(digest_b64)
-    except (ValueError, TypeError):
-        return False
-    actual = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
-    return hmac.compare_digest(actual, expected)
 
 
 # ---------------------------------------------------------------------- 查詢

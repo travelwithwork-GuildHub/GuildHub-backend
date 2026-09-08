@@ -20,18 +20,34 @@ async def test_auth_login_then_me_returns_myself(db, api):
     assert me.json()["id"] == created.json()["id"]
 
 
-async def test_auth_login_has_no_password_field(db, api):
-    """規格書 §9：暱稱即可，不走 OAuth。守則 §3：禁止密碼欄位。
+async def test_auth_login_modes_are_frozen(db, api):
+    """登入的輸入形狀是被鎖住的，要改必須有人裁決。
 
-    BE-G01 的裁決（9/7）加進了 resume_token，所以欄位集合不再只有一個。
-    它不是密碼 —— 拿到它的人就是那張名片的人，後端不會也無法分辨 —— 但這條
-    測試要擋的東西沒有變，所以下面第二條直接對「密碼」斷言，不再靠欄位數量
-    間接擋。第一條仍然是精確集合：往後再多一個欄位一樣會紅，一樣要有人裁決。
+    這條測試原本叫 `test_auth_login_has_no_password_field`，守的是守則 §3
+    「禁止密碼欄位」。**9/8 P1 裁決做 L3（帳號密碼登入），那條規則被正式
+    翻案**，守則 §3 與 CLAUDE.md 已同步改寫 —— 所以這裡守的東西跟著換，
+    不是被繞過。
+
+    現在守的是三件仍然成立的事：
+
+    1. 剛好三種模式，欄位集合精確 —— 多一個少一個都要有人來裁決
+    2. **OAuth／第三方登入仍然不做**（守則 §3 那一列沒有被翻案）
+    3. 匿名暱稱登入還在（規格書 §9：發表日現場進場不能卡在註冊）
     """
     from app.models import LoginIn
 
-    assert set(LoginIn.model_fields) == {"nickname", "resume_token"}
-    assert not [f for f in LoginIn.model_fields if "password" in f or "secret" in f]
+    assert set(LoginIn.model_fields) == {
+        "nickname",
+        "resume_token",
+        "login_id",
+        "password",
+    }
+    assert not [
+        f for f in LoginIn.model_fields if "oauth" in f or "provider" in f
+    ]
+
+    anonymous = await api.post("/api/login", json={"nickname": "現場訪客"})
+    assert anonymous.status_code == 200
 
 
 async def test_auth_two_logins_are_two_people(db, login):

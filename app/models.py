@@ -23,7 +23,7 @@ import datetime as dt
 import enum
 import uuid
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class ProjectStatus(str, enum.Enum):
@@ -74,18 +74,53 @@ class LoginIn(BaseModel):
     我」。要後者得做帳號密碼，那會動到 sql/001_schema.sql 與規格書 §9，是另一
     個決定。
 
-    兩個都給、或都不給，都是 422。刻意不做「兩個都給就以某一邊為準」——
-    那是在兩份互相打架的意圖裡自己挑一邊信，而呼叫端不會知道被挑掉的是哪一個。
+    - `login_id` + `password` —— 帳號密碼登入（L3，9/8 裁決）。這一組才是**驗證
+      身分**：它證明這個身分屬於你，前兩種都不證明
+
+    剛好給一組，多給或少給都是 422。刻意不做「都給就以某一邊為準」——
+    那是在互相打架的意圖裡自己挑一邊信，而呼叫端不會知道被挑掉的是哪一個。
+
+    三種模式並存不是折衷，是三種不同的入場方式：發表日現場走匿名（§9，不能
+    卡在註冊），一般使用者走帳號密碼，換裝置的人走 resume_token。
     """
 
     nickname: str | None = None
     resume_token: uuid.UUID | None = None
+    login_id: str | None = None
+    password: str | None = None
 
     @model_validator(mode="after")
     def exactly_one_mode(self) -> "LoginIn":
-        if (self.nickname is None) == (self.resume_token is None):
-            raise ValueError("nickname 與 resume_token 剛好給一個")
+        # login_id 與 password 先當成一組看：只給一半是「打錯了」，不是第四種模式
+        if (self.login_id is None) != (self.password is None):
+            raise ValueError("login_id 與 password 要一起給")
+
+        given = sum(
+            [
+                self.nickname is not None,
+                self.resume_token is not None,
+                self.login_id is not None,
+            ]
+        )
+        if given != 1:
+            raise ValueError("nickname／resume_token／login_id+password 剛好給一組")
         return self
+
+
+class RegisterIn(BaseModel):
+    """註冊一個帳號（L3）。
+
+    `login_id` 是帳號，`nickname` 是世界裡顯示的名字 —— 兩者刻意分開：
+    `display_name` 沒有唯一約束而且改得動，拿它當帳號的話，改名就等於換帳號。
+
+    `login_id` 的長度規則寫在 sql/001_schema.sql 的 check，這裡不重複
+    （守則 §1 規則 3）。密碼長度是唯一的例外：**明文不會進資料庫**，
+    SQL 無從驗起，所以它只能寫在這裡 —— 這不是「兩邊各寫一份」。
+    """
+
+    login_id: str
+    password: str = Field(min_length=8)
+    nickname: str
 
 
 # ------------------------------------------------------------------ 專案／房間

@@ -2,11 +2,13 @@
 
 import uuid
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import db
 from app.deps import get_current_user
-from app.models import LoginIn, ProfileOut
+from app.models import LoginIn, ProfileOut, RegisterIn
+from app.passwords import hash_password, verify_password
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
@@ -42,9 +44,20 @@ async def login(payload: LoginIn, request: Request) -> ProfileOut:
     就再也回不去」，不是「證明這個身分屬於我」——後者要帳號密碼，那會動到
     schema 與規格書 §9，是另一個決定。
 
-    端點數與路徑都沒變，所以附錄 B 的契約沒動；變的只有 request body 的形狀。
+    給 `login_id` + `password` 則是**驗證身分**（L3）：帳號不存在與密碼錯誤
+    回同一句話，不透露哪一個錯了。用 403 而不是 401 —— 401 在整合指南 §4 的
+    約定是「導向登入畫面」，而使用者本來就在登入畫面上，導過去會變成迴圈；
+    403 的約定是「顯示 detail，密碼錯則留在密碼框」，那正是這裡要的行為。
     """
-    if payload.resume_token is not None:
+    if payload.login_id is not None:
+        row = await db.pool().fetchrow(
+            "select * from profiles where login_id = $1", payload.login_id
+        )
+        # 帳號不存在與密碼錯誤回同一個碼、同一句話。分開回等於免費送出一支
+        # 帳號存在性的查詢器，而那是「有沒有這個人」的洩漏，不是登入功能。
+        if row is None or not verify_password(payload.password, row["password_hash"]):
+            raise HTTPException(status_code=403, detail="帳號或密碼錯誤")
+    elif payload.resume_token is not None:
         row = await db.pool().fetchrow(
             "select * from profiles where id = $1", payload.resume_token
         )
@@ -58,6 +71,36 @@ async def login(payload: LoginIn, request: Request) -> ProfileOut:
             uuid.uuid4(),
             payload.nickname,
         )
+
+    _remember(request, row)
+    return ProfileOut(**dict(row))
+
+
+@router.post("/register", response_model=ProfileOut)
+async def register(payload: RegisterIn, request: Request) -> ProfileOut:
+    """建立一個帶帳號密碼的名片（L3，9/8 裁決）。
+
+    註冊完直接是登入狀態 —— 註冊後再叫人登入一次，是拿使用者的時間去補一個
+    系統自己就能做的動作。
+
+    撞名由 profiles.login_id 的 unique 擋，不先查再寫（守則 §1 規則 4）：
+    先查再寫在單機測試裡永遠是對的，兩個人同時註冊同一個帳號才會露出來。
+
+    這裡不做 email、不做驗證信、不做密碼重設 —— 沒有寄信管道，做出來的
+    「忘記密碼」會是一條走不完的路。使用者忘記密碼就用 resume_token 回來，
+    或重新註冊一個。
+    """
+    try:
+        row = await db.pool().fetchrow(
+            "insert into profiles (id, display_name, login_id, password_hash) "
+            "values ($1, $2, $3, $4) returning *",
+            uuid.uuid4(),
+            payload.nickname,
+            payload.login_id,
+            hash_password(payload.password),
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail="這個帳號已經有人用了")
 
     _remember(request, row)
     return ProfileOut(**dict(row))

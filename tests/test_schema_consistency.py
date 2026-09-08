@@ -92,6 +92,13 @@ EXACT = [
     (models.MessageOut, "messages"),
 ]
 
+# 刻意不外送的欄位。L3（9/8）之後 profiles 存了帳號與密碼雜湊，而 ProfileOut
+# 是人才看板上對所有人公開的東西。
+#
+# 注意這不是把規則放寬成「子集就好」—— 扣掉這兩個之後仍然要求**完全相等**，
+# 少一個欄位照樣會紅。要新增例外必須寫在這裡，而寫在這裡就會被 review 看到。
+SECRET_COLUMNS = {"profiles": {"login_id", "password_hash"}}
+
 SUBSET = [
     (models.ProjectOut, "projects"),
     (models.SeatOut, "seats"),
@@ -104,14 +111,29 @@ SUBSET = [
 @pytest.mark.parametrize("model,table", EXACT, ids=[m.__name__ for m, _ in EXACT])
 def test_response_model_matches_its_table_exactly(model, table):
     """這兩個走 `returning *`，所以欄位必須完全相等 —— 少一個會缺欄位，
-    多一個會是 Pydantic 的必填欄位拿不到值。"""
-    assert set(model.model_fields) == SCHEMA_TABLES[table]
+    多一個會是 Pydantic 的必填欄位拿不到值。
+
+    唯一的扣除是 SECRET_COLUMNS：那些欄位讀得到，但沒有路徑送得出去。
+    """
+    assert set(model.model_fields) == SCHEMA_TABLES[table] - SECRET_COLUMNS.get(
+        table, set()
+    )
 
 
 @pytest.mark.parametrize("model,table", SUBSET, ids=[m.__name__ for m, _ in SUBSET])
 def test_model_fields_all_exist_in_the_table(model, table):
     unknown = set(model.model_fields) - SCHEMA_TABLES[table]
     assert not unknown, f"{model.__name__} 有 {table} 沒有的欄位：{sorted(unknown)}"
+
+
+def test_profile_out_never_carries_credentials():
+    """L3（9/8）：帳號與密碼雜湊存在 profiles 裡，但不該有任何路徑把它們送出去。
+
+    與下面那條 projects 的是同一個道理，只是這一次外洩的後果更大 ——
+    ProfileOut 會出現在人才看板的列表裡，一次送出所有人的資料。
+    """
+    assert {"login_id", "password_hash"} <= SCHEMA_TABLES["profiles"]
+    assert not {"login_id", "password_hash"} & set(models.ProfileOut.model_fields)
 
 
 def test_project_out_never_carries_the_password_hash():

@@ -13,6 +13,10 @@ from app.main import app
 # 附錄 B 原文。改這張表等於改對外契約 —— 凍結後要改必須通知 P2。
 EXPECTED = {
     ("POST", "/api/login"),
+    # 9/8 的 L3 裁決加的第 17 個端點。加端點就是動對外契約，所以這一列進來的
+    # 同時，API-前端整合指南.md §3.2 與 §5.1 也一起改了 —— 契約有兩份紀錄，
+    # 只改一份就是下一次「前端說有、後端說沒有」的來源。
+    ("POST", "/api/register"),
     ("GET", "/api/me"),
     ("GET", "/api/profiles"),
     ("GET", "/api/profiles/{profile_id}"),
@@ -32,6 +36,8 @@ EXPECTED = {
 
 # 明確不存在的端點（附錄 B 末段：列出以防日後有人順手補上）
 FORBIDDEN = {
+    ("POST", "/api/password-reset"),  # 沒有寄信管道，做不出走得完的重設流程
+    ("PATCH", "/api/me/password"),  # 同上；忘記密碼走 resume_token 或重新註冊
     ("PATCH", "/api/messages/{message_id}"),  # §4.2 站內信 immutable
     ("DELETE", "/api/messages/{message_id}"),
     ("DELETE", "/api/projects/{project_id}/seats/{seat_index}"),  # 釋放座位已砍除

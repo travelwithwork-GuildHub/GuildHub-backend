@@ -100,7 +100,7 @@ WebSocket 握手時瀏覽器會自動帶上 cookie，不需要（也無法）手
 
 規格 §9：匿名暱稱登入，**沒有密碼、沒有 OAuth**。
 
-`POST /api/login` 有兩種模式，**body 剛好給一個欄位**，兩個都給或都不給是 422：
+`POST /api/login` 有**三種模式**，body 剛好給一組，多給或少給都是 422：
 
 ```http
 POST /api/login
@@ -111,7 +111,41 @@ POST /api/login
 {"resume_token": "<ProfileOut.id>"}   # 拿回既有的名片
 → 200 ProfileOut（同時 Set-Cookie）
 → 404 {"detail":"名片不存在"}          # 名片被刪了，或資料庫重建過
+
+POST /api/login
+{"login_id": "akai", "password": "guild1234"}   # 帳號密碼登入
+→ 200 ProfileOut（同時 Set-Cookie）
+→ 403 {"detail":"帳號或密碼錯誤"}
 ```
+
+#### 註冊（2026-09-08 新增，第 17 個端點）
+
+```http
+POST /api/register
+{"login_id": "akai", "password": "guild1234", "nickname": "晨風遊俠"}
+→ 200 ProfileOut（同時 Set-Cookie，**註冊完直接是登入狀態**）
+→ 409 {"detail":"這個帳號已經有人用了"}
+→ 422 密碼少於 8 個字
+```
+
+- `login_id` 是帳號，`nickname` 是世界裡顯示的名字，**兩者分開**：
+  `display_name` 改得動，拿它當帳號的話改名就等於換帳號
+- `login_id` 長度 3–32 由資料庫的 check 擋，所以**超出範圍是 500 不是 422**
+  （與 `display_name` 同一個慣例，見 §8）
+- **沒有密碼重設、沒有忘記密碼信、沒有 email 驗證。** 沒有寄信管道，
+  做出來會是一條走不完的路。忘記密碼請走 `resume_token` 或重新註冊
+- 失敗用 **403 不是 401**：401 在 §4 的約定是「導向登入畫面」，
+  而使用者本來就在登入畫面上；403 的約定是「顯示 detail，密碼錯則留在密碼框」
+
+#### 三種模式怎麼選
+
+| 情境 | 用哪一種 |
+|---|---|
+| 發表日現場觀眾進場 | `nickname`（**不能要求註冊**，規格書 §9） |
+| 同一個人換裝置／清掉 cookie | `resume_token` |
+| 想留下來、要能證明身分的使用者 | `login_id` + `password` |
+
+**三種並存，不是三選一。** 匿名那條沒有被取代。
 
 **⚠️ 給 `nickname` 的那條路每呼叫一次就建一張全新的名片。**
 沒有「用同一個暱稱登回原本的身分」這條路徑 —— 那條路是 `insert`，不是查詢。
@@ -188,10 +222,13 @@ FastAPI 標準格式：
 
 ---
 
-## 5. REST 端點（16 個，已凍結）
+## 5. REST 端點（17 個，已凍結）
 
 端點集合由 `tests/test_contract.py` 鎖住，多一個少一個都會讓測試紅掉。
 **凍結後要改欄位，後端會先通知前端。**
+
+> 2026-09-08：L3 裁決加了 `POST /api/register`，端點從 16 個變 17 個。
+> 這是凍結後唯一一次加端點，且先有裁決才改表。
 
 分頁一律 `?page=`，**每頁 20 筆，從 0 開始**。翻過尾頁回 `[]`（不是 404）。
 回應沒有 total count，前端請以「回傳筆數 < 20」判斷已到底。
@@ -200,7 +237,8 @@ FastAPI 標準格式：
 
 | Method | Path | 說明 |
 |---|---|---|
-| POST | `/api/login` | body `{nickname}` **或** `{resume_token}`，剛好給一個 → `ProfileOut`。給 `nickname` 每次都建新名片；給 `resume_token` 拿回既有名片，找不到 404（見 §3.2） |
+| POST | `/api/login` | body `{nickname}`／`{resume_token}`／`{login_id, password}`，剛好給一組 → `ProfileOut`。憑證錯 403（見 §3.2） |
+| POST | `/api/register` | body `{login_id, password, nickname}` → `ProfileOut` 並直接登入；帳號重複 409、密碼少於 8 字 422 |
 | GET | `/api/me` | → `ProfileOut`；未登入 401 |
 
 ### 5.2 人才看板

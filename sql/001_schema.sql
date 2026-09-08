@@ -11,11 +11,17 @@
 create table profiles (
   id             uuid primary key,
   display_name   text not null check (char_length(display_name) between 1 and 20),
+  login_id       text unique check (char_length(login_id) between 3 and 32),
+  password_hash  text,
   avatar_id      smallint not null default 0,
   skills         text[] not null default '{}',
   hours_per_week smallint,
   bio            text check (char_length(bio) <= 300),
-  updated_at     timestamptz not null default now()
+  updated_at     timestamptz not null default now(),
+  -- 帳號密碼登入（L3，9/8 裁決）。兩欄都可以是空的 —— 匿名名片就是兩欄皆空，
+  -- 發表日的現場進場仍然走那條路（§9）。有一半的名片是登不進去的死帳號，
+  -- 所以用 check 綁成全有或全無，而不是靠應用層記得一起寫。
+  constraint credentials_all_or_nothing check ((login_id is null) = (password_hash is null))
 );
 
 -- ============ 專案，同時就是房間 ============
