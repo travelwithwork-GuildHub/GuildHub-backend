@@ -43,7 +43,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="GuildHub", version="0.1", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=config.SESSION_SECRET)
+# same_site／https_only 由 COOKIE_CROSS_SITE 決定（見 config.py）。同源部署時
+# 是 lax，前端在別的網域時必須是 none + Secure，否則 cookie 跨不過去。
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=config.SESSION_SECRET,
+    same_site=config.SESSION_COOKIE_SAME_SITE,
+    https_only=config.SESSION_COOKIE_HTTPS_ONLY,
+)
 
 # CORS 在 Session 之後掛，因此包在更外層（add_middleware 是往外加的）。順序
 # 有影響：preflight 的 OPTIONS 不帶 cookie，必須在碰到 session 之前就被回掉。

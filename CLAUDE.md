@@ -35,7 +35,7 @@
 
 | 不要 | 為什麼 |
 |---|---|
-| Docker / docker-compose | 已砍除，直接 VM + systemd（`deploy/`） |
+| Docker / docker-compose | 已砍除。2026-09-08 起正式部署走 Railway，打包由平台處理；**這個 repo 裡不要出現 Dockerfile 或 compose 檔**。細節與備援方案見 [deploy/README.md](deploy/README.md) |
 | Alembic 或任何 migration 框架 | 一次性實例，用編號的 `.sql` 檔 |
 | Redis | 狀態量小，記憶體足夠 |
 | Celery / APScheduler 等排程器 | 貼文時效自動化已砍除 |
