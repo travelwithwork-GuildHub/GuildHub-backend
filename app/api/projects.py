@@ -129,15 +129,23 @@ async def form_team(
 async def close_project(project_id: uuid.UUID = Depends(require_owner)) -> ProjectOut:
     """[P35] 結案。§6.1：座位全數釋放、門從走廊移除。
 
-    ⚠ 這裡有一個規格內部的矛盾，需要 P1 裁決：
-      · §4.1 說「專案結束時座位自動釋放」的機制是 on delete cascade
-      · 但 cascade 只在「刪除專案列」時觸發，而 §6.1 的生命週期圖顯示
-        closed 是專案保留下來的一個狀態（門移除，專案還在）
-      · 任務表 [P34] 又註明「須由 DB cascade 達成，不得在應用層逐筆刪除」
+    **2026-09-08 P1 裁決（選項 A）：維持這個行為，改正文件。**
 
-    目前的作法：同一個交易內把 status 改成 closed，並以「一句 delete」釋放
-    座位（集合操作，不是在 Python 裡逐筆迴圈）。若 P1 認定結案就該刪除專案
-    列，改成 delete 即可，cascade 會自然接手。
+    背景是規格書內部的矛盾：§4.1 說「專案結束時座位自動釋放」的機制是
+    on delete cascade，但 cascade 只在刪除專案列時觸發，而 §6.1 的生命週期圖
+    裡 closed 是專案**保留下來**的狀態 —— 專案還在，cascade 不會發生。
+
+    裁決保留的作法：同一個交易內把 status 改成 closed，並以**一句 delete**
+    釋放座位。是集合操作，不是在 Python 裡逐筆迴圈，所以任務表 [P34] 的
+    「不得在應用層逐筆刪除」仍然成立。
+
+    被否決的兩個選項與理由：
+      · 結案即刪除專案列（讓 cascade 真的發生）—— 專案歷史隨之消失，
+        前端的 BE-G22／FE-T（合作紀錄與聲譽）就永遠做不成了
+      · 加 trigger —— 為了一句文件引入這個 repo 目前沒有的隱藏控制流
+
+    **代價（明寫在這裡，因為它不再由資料庫保證）：** 座位釋放是這一段程式的
+    責任。刪掉下面那句 delete，沒有任何約束會擋，而測試會是唯一的守門員。
     """
     async with db.pool().acquire() as conn:
         async with conn.transaction():

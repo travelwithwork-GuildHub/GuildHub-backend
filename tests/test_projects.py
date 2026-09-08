@@ -157,10 +157,12 @@ async def test_room_ready_check_blocks_activation_without_a_room(db, login):
 async def test_close_releases_every_seat(db, login):
     """§6.1：結案時座位全數釋放。
 
-    ⚠ 這裡有一個規格內部的矛盾待 P1 裁決（見 app/api/projects.py 的註解）：
-    §4.1 說機制是 on delete cascade，但 cascade 只在刪除專案列時觸發，而
-    §6.1 的生命週期圖顯示 closed 是專案保留下來的狀態。這個測試只驗結果
-    （座位消失、專案還在），不綁定實作手段。
+    2026-09-08 P1 裁決（選項 A）：closed 保留專案列，座位由 close_project()
+    在同一交易內以一句 delete 釋放，不走 cascade。規格書 §4.1 已改正。
+
+    **裁決之後這條測試更重要，不是更不重要。** 座位釋放從「資料庫保證的
+    不變式」降級成「應用層的責任」—— 下面兩個斷言是唯一會擋下漏刪的東西。
+    仍然只驗結果（座位消失、專案還在），不綁定實作手段。
     """
     owner = await login("發起人")
     project_id = await new_project(owner)
