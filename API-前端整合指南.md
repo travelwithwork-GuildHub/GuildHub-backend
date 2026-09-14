@@ -78,6 +78,12 @@ CORS_ORIGINS=http://localhost:4321,https://guildhub.example.com
   （SameSite 只看網域，不看 port），所以本機開發沒問題。但**若正式環境把前後端
   放在不同網域**，Lax 會讓 cookie 送不出去——那時要改的是 cookie 的 `SameSite`
   與 `Secure`，不是 CORS。請先跟後端談
+- **正式環境走同源**（2026-09-14）：`vercel.app`、`up.railway.app` 都在 Public
+  Suffix List 上，前後端各用一個免費子網域就是跨站，Safari 會把 session cookie
+  當第三方 cookie 擋掉。所以正式環境是一個網址、由 Caddy 依路徑分流：
+  `/api/*`、`/ws`、`/health`、`/docs`、`/openapi.json` 給後端，其餘給前端。
+  前端的 `NEXT_PUBLIC_GUILDHUB_REST` 與 `NEXT_PUBLIC_GUILDHUB_WS` 都填**那一個
+  網址**。細節見 [deploy/README.md](deploy/README.md)
 - 仍然可以改用 dev server proxy（Vite `server.proxy`）走同源，兩種都支援
 
 ---
