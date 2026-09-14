@@ -5,6 +5,7 @@
 用法：
     python tools/run_swarm.py --n 40 --seconds 60
     python tools/run_swarm.py --n 5 --idle      # 靜止，驗證 pos 封包數為 0
+    python tools/run_swarm.py --url wss://<閘道網址>/ws --n 50 --seconds 60   # [D05] 部署環境
 
 --idle 是規格書 §3.2 的驗收手段：「驗收 A2 時要抓封包確認這件事，不能只看
 程式碼」。靜止時 pos 應該一則都不送。
@@ -58,7 +59,13 @@ async def drive(client: FakeClient, seconds: float, idle: bool, sent: Counter) -
 
 async def main(args: argparse.Namespace) -> int:
     clients = [
-        FakeClient(f"bot-{i:03d}", scene=args.scene, host=args.host, port=args.port)
+        FakeClient(
+            f"bot-{i:03d}",
+            scene=args.scene,
+            host=args.host,
+            port=args.port,
+            base_url=args.url,
+        )
         for i in range(args.n)
     ]
     sent: Counter = Counter()
@@ -102,15 +109,19 @@ async def main(args: argparse.Namespace) -> int:
     return 0 if verdict == "PASS" else 1
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="GuildHub 併發假客戶端驅動器")
     p.add_argument("--n", type=int, default=40, help="併發連線數")
     p.add_argument("--seconds", type=float, default=10.0, help="持續秒數")
     p.add_argument("--scene", default="lobby")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument(
+        "--url",
+        help="完整的 WebSocket 位址，例如 wss://<閘道網址>/ws。給了就不看 --host／--port",
+    )
     p.add_argument("--idle", action="store_true", help="不移動，驗證靜止時無 pos")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 if __name__ == "__main__":

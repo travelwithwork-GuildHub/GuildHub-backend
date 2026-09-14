@@ -10,7 +10,7 @@ import asyncio
 import base64
 import json
 from collections import Counter
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import itsdangerous
 import websockets
@@ -51,12 +51,25 @@ class FakeClient:
         port: int = 8000,
         session_user: str | None = None,
         avatar_id: int = 0,
+        base_url: str | None = None,
     ):
         self.name = name
         self.scene = scene
         self.token = token
         self.host = host
         self.port = port
+        # 部署環境（wss://閘道網址/ws）用這個，給了就不看 host／port。
+        # 協定與查詢字串在建構時就擋：連線時才失敗的話，錯誤跟「後端沒開」
+        # 長得一樣，要查很久。
+        if base_url is not None:
+            parts = urlsplit(base_url)
+            if parts.scheme not in ("ws", "wss") or not parts.netloc:
+                raise ValueError(f"base_url 必須是 ws:// 或 wss:// 開頭：{base_url!r}")
+            if parts.query:
+                raise ValueError(
+                    f"base_url 不要帶查詢字串，scene／token 由參數組：{base_url!r}"
+                )
+        self.base_url = base_url
         # 帶了就是「已登入」，不帶就是匿名訪客（大廳夠用，房間不夠）
         self.session_user = session_user
         # 只有已登入才有外觀 —— 匿名連線在 _identify() 拿到的就是 0
@@ -85,7 +98,8 @@ class FakeClient:
 
     @property
     def url(self) -> str:
-        url = f"ws://{self.host}:{self.port}/ws?scene={self.scene}"
+        base = self.base_url or f"ws://{self.host}:{self.port}/ws"
+        url = f"{base}?scene={self.scene}"
         if self.token:
             url += f"&token={self.token}"
         return url
