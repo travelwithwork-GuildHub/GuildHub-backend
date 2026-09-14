@@ -1,0 +1,5 @@
+# shell 腳本一律 LF。CRLF 的 run.sh 在 macOS／Linux 上會把 `set -e` 讀成
+# `set -e\r`，整支腳本語法錯誤（前端 2026-09-10 實測回報）。
+# Windows 上 core.autocrlf=false 時 git 不會自動轉，所以靠這一行擋，
+# 不靠每個人記得設定。
+*.sh text eol=lf

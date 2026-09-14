@@ -15,10 +15,15 @@ ROOM_TOKEN_SECRET = os.getenv("ROOM_TOKEN_SECRET", "dev-room-token-secret-change
 # room token 有效期。規格書 §6.2：驗證通過後取得 room token 存於 session。
 ROOM_TOKEN_TTL_SECONDS = 8 * 60 * 60
 
-# 允許跨源請求的前端來源。逗號分隔，預設是 Vite 與 CRA／Next 的 dev port。
+# 允許跨源請求的前端來源。逗號分隔，預設是 Vite 與 CRA／Next 的 dev port，
+# 加上 GuildHub-frontend 實際用的兩個：`next dev -p 3100` 與 `next start -p 3101`
+# （前端 package.json）。少了後兩個，前端照預設跑起來打本機後端會被 CORS 擋下。
 #
 # 部署時前後端同一個 origin 的話，這個清單可以留空 —— 同源請求不經過 CORS。
-_DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://localhost:3000"
+_DEFAULT_CORS_ORIGINS = (
+    "http://localhost:5173,http://localhost:3000,"
+    "http://localhost:3100,http://localhost:3101"
+)
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv("CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")

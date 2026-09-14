@@ -47,14 +47,16 @@ npx openapi-typescript http://localhost:8000/openapi.json -o src/api/schema.d.ts
 
 ## 2. CORS
 
-**已設定好了**（`app/main.py` 的 `CORSMiddleware`）。預設放行兩個 dev origin：
+**已設定好了**（`app/main.py` 的 `CORSMiddleware`）。預設放行四個 dev origin：
 
 ```
 http://localhost:5173     # Vite
-http://localhost:3000     # CRA／Next
+http://localhost:3000     # CRA／Next 預設
+http://localhost:3100     # GuildHub-frontend：next dev
+http://localhost:3101     # GuildHub-frontend：next start
 ```
 
-前端跑在這兩個 port 之一，直接打 `http://localhost:8000` 就會通，**唯一要記得的
+前端跑在這些 port 之一，直接打 `http://localhost:8000` 就會通，**唯一要記得的
 是每個請求都要帶 `credentials`**（見 §3.1）——身分走 cookie，沒帶就是 401。
 
 用別的 port 或別的網域，改後端的 `.env`：

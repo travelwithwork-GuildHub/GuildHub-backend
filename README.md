@@ -57,7 +57,7 @@ WS 協定的權威版本是 `app/realtime/protocol.py`（可執行的那份）�
 | `TEST_DATABASE_URL` | **測試專用**的連線字串。測試會 `drop schema`，所以跟上面那個分開；沒設的話需要資料庫的測試會 skip，**不會退回 `DATABASE_URL`** | `postgresql://guildhub:guildhub@localhost:5432/guildhub_test` |
 | `SESSION_SECRET` | session cookie 的簽章金鑰。**上線前務必換掉** | `change-me` |
 | `ROOM_TOKEN_SECRET` | room token 的簽章金鑰，TTL 8 小時。**上線前務必換掉** | `change-me` |
-| `CORS_ORIGINS` | 允許帶 cookie 跨源的前端來源，逗號分隔。不接受 `*`（見下方 CORS 說明），前後端同源時留空 | `http://localhost:5173,http://localhost:3000` |
+| `CORS_ORIGINS` | 允許帶 cookie 跨源的前端來源，逗號分隔。不接受 `*`（見下方 CORS 說明），前後端同源時留空 | `http://localhost:5173,http://localhost:3000,http://localhost:3100,http://localhost:3101` |
 
 ### 資料庫
 
@@ -152,7 +152,8 @@ python tools/run_swarm.py --n 5 --idle
 語意、以及幾個照 schema 寫會踩到的行為（超長欄位回 500、`read_at` 永遠是 null、
 靜止時收不到 `pos`）。
 
-**CORS 已設定。** 預設放行 `http://localhost:5173` 與 `http://localhost:3000`，
+**CORS 已設定。** 預設放行 `http://localhost:5173`、`3000`，以及前端 repo 實際
+用的 `3100`（`next dev`）與 `3101`（`next start`），
 換 port 改 `.env` 的 `CORS_ORIGINS`（逗號分隔，不接受 `*`——帶 cookie 的跨源請求
 瀏覽器不收萬用字元，填了會在啟動時報錯）。前端每個請求都要帶
 `credentials: 'include'`，否則 session cookie 不會送出去，症狀是全部 401。
