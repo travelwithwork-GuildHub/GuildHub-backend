@@ -8,6 +8,7 @@ from urllib.parse import unquote
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.websockets import WebSocketState
 
 from app import config, db
 from app.api import auth, messages, profiles, projects, rooms, seats
@@ -141,5 +142,14 @@ async def ws_endpoint(ws: WebSocket, scene: str = "lobby", token: str | None = N
                 await broadcaster.relay_chat(conn.scene, user_id, name, msg.body)
     except WebSocketDisconnect:
         pass
+    except RuntimeError:
+        # 廣播端對這條連線送出失敗時，Starlette 把它標成 DISCONNECTED 並在
+        # 廣播那一側丟 WebSocketDisconnect；這一側下一次 receive_text() 拿到的
+        # 卻是 RuntimeError。那是同一個斷線，不是 bug —— 當成斷線收掉，否則
+        # 同時關閉的人一多，traceback 會把平台的日誌額度灌爆
+        # （tests/realtime/test_disconnect_after_send_failure.py）。
+        # 只收這一種：連線還活著卻丟 RuntimeError 的話，那才是真的 bug，照丟。
+        if ws.application_state != WebSocketState.DISCONNECTED:
+            raise
     finally:
         await manager.disconnect(conn)
