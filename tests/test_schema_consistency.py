@@ -91,6 +91,8 @@ def test_schema_is_not_defined_by_an_orm():
 EXACT = [
     (models.ProfileOut, "profiles"),
     (models.MessageOut, "messages"),
+    # BE-G12：ProjectResourceOut 也是 `returning` 全部欄位建構的，沒有祕密欄位。
+    (models.ProjectResourceOut, "project_resources"),
 ]
 
 # 刻意不外送的欄位。L3（9/8）之後 profiles 存了帳號與密碼雜湊，而 ProfileOut
@@ -106,6 +108,9 @@ SUBSET = [
     (models.ProfileUpdate, "profiles"),
     (models.SeatClaim, "seats"),
     (models.ProjectCreate, "projects"),
+    # BE-G12：request model 只放得動的欄位，id／project_id／created_at 不在裡面。
+    (models.ProjectResourceCreate, "project_resources"),
+    (models.ProjectResourceUpdate, "project_resources"),
 ]
 
 
