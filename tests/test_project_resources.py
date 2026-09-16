@@ -54,6 +54,20 @@ async def active(login, who: str = "發起人") -> tuple[str, object]:
     return project_id, owner
 
 
+async def another_active(owner) -> str:
+    """同一個發起人再開一個已成軍的專案。"""
+    created = await owner.post(
+        "/api/projects", json={"title": "另一個專案", "body": "內文", "seat_count": 8}
+    )
+    assert created.status_code == 201, created.text
+    project_id = created.json()["id"]
+    formed = await owner.post(
+        f"/api/projects/{project_id}/form-team", json={"password": PASSWORD}
+    )
+    assert formed.status_code == 200, formed.text
+    return project_id
+
+
 async def enter(client, project_id: str) -> None:
     """通過房間密碼，把 room token 放進這個 client 的 session。"""
     response = await client.post(
@@ -231,9 +245,13 @@ async def test_patch_rejects_an_explicit_null(db, login, field):
 
 async def test_patch_on_a_resource_from_another_project_is_404(db, login):
     """resource_id 存在，但不屬於 path 上的那個 project —— 不能因為「東西存在」
-    就讓它被改到。"""
+    就讓它被改到。
+
+    兩個專案都是同一個發起人的，否則先擋下來的會是 403（非發起人），
+    這條就驗不到「path 與 resource 要對得起來」。
+    """
     mine, owner = await active(login, "我")
-    other, _stranger_owner = await active(login, "別人")
+    other = await another_active(owner)
     created = await add(owner, mine)
 
     response = await owner.patch(path(other, created["id"]), json={"label": "x"})
