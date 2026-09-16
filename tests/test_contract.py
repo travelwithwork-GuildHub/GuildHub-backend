@@ -32,6 +32,13 @@ EXPECTED = {
     ("POST", "/api/messages"),
     ("GET", "/api/messages"),
     ("GET", "/api/rooms"),
+    # BE-G12（2026-09-16，得到授權）Project Resources：第 18～21 個端點。
+    # 同 L3 的紀律 —— 這四列進來的同時，API-前端整合指南.md §5 與 README 的
+    # 端點數也一起改了。只追加，既有 17 列一個字都沒動。
+    ("GET", "/api/projects/{project_id}/resources"),
+    ("POST", "/api/projects/{project_id}/resources"),
+    ("PATCH", "/api/projects/{project_id}/resources/{resource_id}"),
+    ("DELETE", "/api/projects/{project_id}/resources/{resource_id}"),
 }
 
 # 明確不存在的端點（附錄 B 末段：列出以防日後有人順手補上）

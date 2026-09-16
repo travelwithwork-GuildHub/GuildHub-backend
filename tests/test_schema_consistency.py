@@ -22,7 +22,8 @@ from app import models
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA = ROOT / "sql" / "001_schema.sql"
 
-SPEC_TABLES = {"profiles", "projects", "seats", "messages"}
+# BE-G12（2026-09-16，得到授權）追加 project_resources。只追加，既有四張沒動。
+SPEC_TABLES = {"profiles", "projects", "seats", "messages", "project_resources"}
 
 # 這些關鍵字開頭的行是約束，不是欄位
 _NOT_A_COLUMN = re.compile(
