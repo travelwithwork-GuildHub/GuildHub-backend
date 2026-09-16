@@ -19,10 +19,15 @@
 """
 
 import asyncio
+import datetime as dt
+import time
 import uuid
 
 import asyncpg
+import httpx
 import pytest
+
+from app.main import app
 
 pytestmark = pytest.mark.db
 
@@ -85,6 +90,90 @@ async def add(client, project_id: str, **overrides) -> dict:
 
 def path(project_id: str, resource_id: str) -> str:
     return f"/api/projects/{project_id}/resources/{resource_id}"
+
+
+def assert_detail(response, expected: str) -> None:
+    """4xx 的 body 形狀是 `{"detail": 中文字串}`（422 除外，那是 Pydantic 的陣列）。"""
+    assert response.json() == {"detail": expected}, response.text
+
+
+async def snapshot(db) -> list[dict]:
+    """整張表的內容。被拒絕的請求之後要跟之前一模一樣 —— 只比筆數的話，
+    「沒有新增但改掉了 label」會被當成沒事。"""
+    rows = await db.fetch(
+        "select id, project_id, label, type, url, created_at "
+        "from project_resources order by id"
+    )
+    return [dict(row) for row in rows]
+
+
+async def expect_database_error(client, method: str, url: str, **kwargs) -> None:
+    """資料庫 check 擋下的請求：對外是 500 text/plain，不是 422。
+
+    測試用的 client 預設把 app 內的例外直接拋出來（`raise_app_exceptions`），
+    那樣只能寫 `pytest.raises(Exception)`，任何例外都算過。這裡另開一個不拋的
+    client、沿用同一組 cookie，斷言真正送到前端的回應。
+    """
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+        cookies=client.cookies,
+    ) as raw:
+        response = await raw.request(method, url, **kwargs)
+
+    assert response.status_code == 500, response.text
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.text == "Internal Server Error"
+
+
+async def wait_until_blocked(db, count: int, tasks) -> None:
+    """等到恰好有 `count` 個請求卡在資料庫鎖上。
+
+    並行測試不能靠「剛好同時」：測試用的連線池一開始只有一條連線，五個請求
+    會被現場開連線的時間排成先後，拿掉鎖也照樣綠（審查實測 0/5 紅）。所以由
+    測試自己持鎖、確認每個請求都已經在等，才放手。
+
+    請求自己先結束了（沒有等鎖），就立刻失敗，不必等到逾時。
+    """
+    deadline = time.monotonic() + 10
+    while True:
+        waiting = await db.fetchval("select count(*) from pg_locks where not granted")
+        if waiting >= count:
+            return
+        finished = [t for t in tasks if t.done()]
+        assert not finished, (
+            f"請求沒有等 project 列的鎖就結束了：{[t.result().status_code for t in finished]}"
+        )
+        assert time.monotonic() < deadline, f"只有 {waiting} 個請求在等鎖，預期 {count}"
+        await asyncio.sleep(0.05)
+
+
+class RowHolder:
+    """另一條連線，在交易裡對 project 列做某件事，先不提交。"""
+
+    def __init__(self, db):
+        self.db = db
+        self.open = False
+
+    async def __aenter__(self):
+        self.conn = await self.db.acquire()
+        self.tx = self.conn.transaction()
+        await self.tx.start()
+        self.open = True
+        return self
+
+    async def commit(self) -> None:
+        self.open = False
+        await self.tx.commit()
+
+    async def rollback(self) -> None:
+        self.open = False
+        await self.tx.rollback()
+
+    async def __aexit__(self, *exc):
+        if self.open:
+            await self.tx.rollback()
+        await self.db.release(self.conn)
 
 
 # ------------------------------------------------------------- 基本讀寫行為
@@ -155,6 +244,50 @@ async def test_list_is_ordered_by_creation_then_id(db, login):
 
     assert [r["label"] for r in listed] == ["一", "二", "三"]
     assert [r["id"] for r in listed] == [first["id"], second["id"], third["id"]]
+
+
+async def test_list_order_comes_from_the_query_not_from_insert_order(db, login):
+    """上一條拿掉 ORDER BY 也會綠：剛寫進去的列，讀出來本來就是寫入順序。
+
+    這裡直接對資料庫寫，讓寫入先後跟 (created_at, id) 剛好相反 —— 包含
+    created_at 相同時靠 id 決定的那一段。
+    """
+    project_id, owner = await active(login)
+    pid = uuid.UUID(project_id)
+    base = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+    tie = base + dt.timedelta(minutes=30)
+    for label, resource_id, created_at in [
+        ("最晚", uuid.uuid4(), base + dt.timedelta(hours=1)),
+        ("同時・後", uuid.UUID("ffffffff-ffff-4fff-bfff-ffffffffffff"), tie),
+        ("同時・先", uuid.UUID("00000000-0000-4000-8000-000000000000"), tie),
+        ("最早", uuid.uuid4(), base),
+    ]:
+        await db.execute(
+            "insert into project_resources (id, project_id, label, type, url, created_at) "
+            "values ($1, $2, $3, 'github', 'https://example.com', $4)",
+            resource_id,
+            pid,
+            label,
+            created_at,
+        )
+
+    listed = (await owner.get(f"/api/projects/{project_id}/resources")).json()
+
+    assert [r["label"] for r in listed] == ["最早", "同時・先", "同時・後", "最晚"]
+
+
+async def test_url_is_stored_exactly_as_given(db, login):
+    """不做 URL 正規化：大小寫、query 都原樣存、原樣回。"""
+    project_id, owner = await active(login)
+    url = "HTTPS://GitHub.com/Org/Repo?Tab=Issues"
+
+    created = await add(owner, project_id, url=url)
+
+    assert created["url"] == url
+    stored = await db.fetchval(
+        "select url from project_resources where id = $1", uuid.UUID(created["id"])
+    )
+    assert stored == url
 
 
 async def test_two_resources_may_share_one_url(db, login):
@@ -254,9 +387,72 @@ async def test_patch_on_a_resource_from_another_project_is_404(db, login):
     other = await another_active(owner)
     created = await add(owner, mine)
 
+    before = await snapshot(db)
+
     response = await owner.patch(path(other, created["id"]), json={"label": "x"})
 
     assert response.status_code == 404, response.text
+    assert_detail(response, "資源不存在")
+    assert await snapshot(db) == before
+
+
+async def test_empty_patch_on_a_resource_from_another_project_is_404(db, login):
+    """`{}` 走的是另一句 SQL（只讀不寫），那一句也要限定在 path 的 project 內。
+    漏掉的話，發起人用自己的專案路徑就能讀到任何人任何一筆資源。"""
+    mine, owner = await active(login, "我")
+    other = await another_active(owner)
+    created = await add(owner, mine)
+
+    response = await owner.patch(path(other, created["id"]), json={})
+
+    assert response.status_code == 404, response.text
+    assert_detail(response, "資源不存在")
+
+
+async def test_patch_on_a_missing_resource_is_404(db, login):
+    project_id, owner = await active(login)
+
+    response = await owner.patch(path(project_id, str(uuid.uuid4())), json={"label": "x"})
+
+    assert response.status_code == 404, response.text
+    assert_detail(response, "資源不存在")
+
+
+async def test_patch_after_creation_keeps_the_list_order(db, login):
+    """改過的那一筆不會跑到最後 —— 排序看 created_at，不看最後修改。"""
+    project_id, owner = await active(login)
+    first = await add(owner, project_id, label="一")
+    await add(owner, project_id, label="二")
+
+    await owner.patch(path(project_id, first["id"]), json={"label": "改過的一"})
+
+    listed = (await owner.get(f"/api/projects/{project_id}/resources")).json()
+    assert [r["label"] for r in listed] == ["改過的一", "二"]
+
+
+async def test_patch_may_duplicate_another_url(db, login):
+    project_id, owner = await active(login)
+    await add(owner, project_id, label="一", url="https://example.com/a")
+    second = await add(owner, project_id, label="二", url="https://example.com/b")
+
+    response = await owner.patch(
+        path(project_id, second["id"]), json={"url": "https://example.com/a"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["url"] == "https://example.com/a"
+
+
+async def test_patch_that_breaks_a_database_check_is_500_and_changes_nothing(db, login):
+    project_id, owner = await active(login)
+    created = await add(owner, project_id)
+    before = await snapshot(db)
+
+    await expect_database_error(
+        owner, "PATCH", path(project_id, created["id"]), json={"label": "字" * 101}
+    )
+
+    assert await snapshot(db) == before
 
 
 # ------------------------------------------------------------------ DELETE
@@ -290,6 +486,21 @@ async def test_deleting_twice_is_404_the_second_time(db, login):
     again = await owner.delete(path(project_id, created["id"]))
 
     assert again.status_code == 404, again.text
+    assert_detail(again, "資源不存在")
+
+
+async def test_delete_on_a_resource_from_another_project_is_404(db, login):
+    """用自己專案 P 的路徑，不能刪掉 Q 的資源。兩個專案同一個發起人，理由同 PATCH 那條。"""
+    mine, owner = await active(login, "我")
+    other = await another_active(owner)
+    created = await add(owner, mine)
+    before = await snapshot(db)
+
+    response = await owner.delete(path(other, created["id"]))
+
+    assert response.status_code == 404, response.text
+    assert_detail(response, "資源不存在")
+    assert await snapshot(db) == before
 
 
 # ------------------------------------------------------- 權限：誰讀得到、誰寫得動
@@ -315,6 +526,7 @@ async def test_ticket_holder_cannot_write(db, login):
     created = await add(owner, project_id)
     member = await login("組員")
     await enter(member, project_id)
+    before = await snapshot(db)
 
     posted = await member.post(f"/api/projects/{project_id}/resources", json=GITHUB)
     patched = await member.patch(path(project_id, created["id"]), json={"label": "x"})
@@ -325,8 +537,26 @@ async def test_ticket_holder_cannot_write(db, login):
         403,
         403,
     ]
-    # 而且真的沒有寫進去。
-    assert await db.fetchval("select count(*) from project_resources") == 1
+    for response in (posted, patched, deleted):
+        assert_detail(response, "只有發起人可以做這件事")
+    # 而且真的沒有寫進去，也沒有改到。
+    assert await snapshot(db) == before
+
+
+async def test_logged_in_stranger_without_a_ticket_cannot_write(db, login):
+    project_id, owner = await active(login)
+    created = await add(owner, project_id)
+    stranger = await login("路人")
+    before = await snapshot(db)
+
+    posted = await stranger.post(f"/api/projects/{project_id}/resources", json=GITHUB)
+    patched = await stranger.patch(path(project_id, created["id"]), json={"label": "x"})
+    deleted = await stranger.delete(path(project_id, created["id"]))
+
+    assert [posted.status_code, patched.status_code, deleted.status_code] == [403, 403, 403]
+    for response in (posted, patched, deleted):
+        assert_detail(response, "只有發起人可以做這件事")
+    assert await snapshot(db) == before
 
 
 async def test_logged_in_stranger_without_a_ticket_cannot_read(db, login):
@@ -338,6 +568,7 @@ async def test_logged_in_stranger_without_a_ticket_cannot_read(db, login):
     response = await stranger.get(f"/api/projects/{project_id}/resources")
 
     assert response.status_code == 403, response.text
+    assert_detail(response, "尚未通過房間密碼驗證")
 
 
 async def test_owner_reads_without_entering_the_room(db, login):
@@ -351,14 +582,22 @@ async def test_owner_reads_without_entering_the_room(db, login):
 
 
 async def test_missing_project_is_404_for_everyone(db, login):
+    """斷言 detail，不只斷言 404：路由不存在時 FastAPI 也回 404（`Not Found`），
+    只看狀態碼的話，這條在端點還沒寫的時候就是綠的。"""
     stranger = await login("路人")
     missing = uuid.uuid4()
+    some_resource = uuid.uuid4()
 
-    listed = await stranger.get(f"/api/projects/{missing}/resources")
-    posted = await stranger.post(f"/api/projects/{missing}/resources", json=GITHUB)
+    responses = [
+        await stranger.get(f"/api/projects/{missing}/resources"),
+        await stranger.post(f"/api/projects/{missing}/resources", json=GITHUB),
+        await stranger.patch(path(str(missing), str(some_resource)), json={"label": "x"}),
+        await stranger.delete(path(str(missing), str(some_resource))),
+    ]
 
-    assert listed.status_code == 404, listed.text
-    assert posted.status_code == 404, posted.text
+    assert [r.status_code for r in responses] == [404, 404, 404, 404]
+    for response in responses:
+        assert_detail(response, "專案不存在")
 
 
 # ------------------------------------------------------------ 生命週期：狀態
@@ -381,6 +620,7 @@ async def test_recruiting_project_rejects_writes(db, login):
     response = await owner.post(f"/api/projects/{project_id}/resources", json=GITHUB)
 
     assert response.status_code == 409, response.text
+    assert_detail(response, "專案還沒成軍，還沒有房間可以放資源")
     assert await db.fetchval("select count(*) from project_resources") == 0
 
 
@@ -412,6 +652,7 @@ async def test_closed_project_rejects_every_write(db, login):
     project_id, owner = await active(login)
     created = await add(owner, project_id)
     await owner.post(f"/api/projects/{project_id}/close", json={})
+    before = await snapshot(db)
 
     posted = await owner.post(f"/api/projects/{project_id}/resources", json=GITHUB)
     patched = await owner.patch(path(project_id, created["id"]), json={"label": "x"})
@@ -422,7 +663,41 @@ async def test_closed_project_rejects_every_write(db, login):
         409,
         409,
     ]
-    assert await db.fetchval("select count(*) from project_resources") == 1
+    for response in (posted, patched, deleted):
+        assert_detail(response, "專案已結案，資源不能再修改")
+    assert await snapshot(db) == before
+
+
+async def test_closed_project_is_403_not_409_for_a_non_owner_write(db, login):
+    """非發起人對結案專案寫入：先說「你不是發起人」，不是「專案已結案」。
+    409 會把「這個專案曾經可以讓你改」的錯覺交給前端。"""
+    project_id, owner = await active(login)
+    created = await add(owner, project_id)
+    member = await login("組員")
+    await enter(member, project_id)
+    await owner.post(f"/api/projects/{project_id}/close", json={})
+    before = await snapshot(db)
+
+    posted = await member.post(f"/api/projects/{project_id}/resources", json=GITHUB)
+    patched = await member.patch(path(project_id, created["id"]), json={"label": "x"})
+    deleted = await member.delete(path(project_id, created["id"]))
+
+    assert [posted.status_code, patched.status_code, deleted.status_code] == [403, 403, 403]
+    for response in (posted, patched, deleted):
+        assert_detail(response, "只有發起人可以做這件事")
+    assert await snapshot(db) == before
+
+
+async def test_closed_project_is_403_for_a_stranger_without_a_ticket(db, login):
+    project_id, owner = await active(login)
+    await add(owner, project_id)
+    await owner.post(f"/api/projects/{project_id}/close", json={})
+    stranger = await login("路人")
+
+    response = await stranger.get(f"/api/projects/{project_id}/resources")
+
+    assert response.status_code == 403, response.text
+    assert_detail(response, "尚未通過房間密碼驗證")
 
 
 async def test_closed_room_is_invisible_to_a_ticket_holder(db, login):
@@ -468,10 +743,9 @@ async def test_label_one_over_the_limit_is_a_database_error(db, login):
     是資料庫錯誤（對外是 500），不是 422。前端自己擋長度。"""
     project_id, owner = await active(login)
 
-    with pytest.raises(Exception):
-        await owner.post(
-            f"/api/projects/{project_id}/resources", json={**GITHUB, "label": "字" * 101}
-        )
+    await expect_database_error(
+        owner, "POST", f"/api/projects/{project_id}/resources", json={**GITHUB, "label": "字" * 101}
+    )
 
     assert await db.fetchval("select count(*) from project_resources") == 0
 
@@ -487,15 +761,25 @@ async def test_emoji_label_counts_code_points_not_bytes(db, login):
     assert created["label"] == "😀" * 100
 
 
+async def test_emoji_label_one_over_the_limit_is_a_database_error(db, login):
+    """跟上一條成對：101 個 emoji 要被擋。只有接受那一邊的話，check 拿掉也會綠。"""
+    project_id, owner = await active(login)
+
+    await expect_database_error(
+        owner, "POST", f"/api/projects/{project_id}/resources", json={**GITHUB, "label": "😀" * 101}
+    )
+
+    assert await db.fetchval("select count(*) from project_resources") == 0
+
+
 async def test_blank_label_is_rejected(db, login):
     """只有空白的標籤在畫面上等於沒有名字。由資料庫的 `btrim(label) <> ''`
     擋下，所以跟長度一樣是資料庫錯誤。"""
     project_id, owner = await active(login)
 
-    with pytest.raises(Exception):
-        await owner.post(
-            f"/api/projects/{project_id}/resources", json={**GITHUB, "label": "   "}
-        )
+    await expect_database_error(
+        owner, "POST", f"/api/projects/{project_id}/resources", json={**GITHUB, "label": "   "}
+    )
 
     assert await db.fetchval("select count(*) from project_resources") == 0
 
@@ -513,8 +797,9 @@ async def test_url_one_over_the_limit_is_a_database_error(db, login):
     project_id, owner = await active(login)
     url = "https://example.com/" + "a" * (2049 - len("https://example.com/"))
 
-    with pytest.raises(Exception):
-        await owner.post(f"/api/projects/{project_id}/resources", json={**GITHUB, "url": url})
+    await expect_database_error(
+        owner, "POST", f"/api/projects/{project_id}/resources", json={**GITHUB, "url": url}
+    )
 
     assert await db.fetchval("select count(*) from project_resources") == 0
 
@@ -525,8 +810,9 @@ async def test_non_http_schemes_never_reach_the_database(db, login, scheme):
     由資料庫的 regex 擋 —— 前端另外還有一層 `safeHref`，兩層都要在。"""
     project_id, owner = await active(login)
 
-    with pytest.raises(Exception):
-        await owner.post(f"/api/projects/{project_id}/resources", json={**GITHUB, "url": scheme})
+    await expect_database_error(
+        owner, "POST", f"/api/projects/{project_id}/resources", json={**GITHUB, "url": scheme}
+    )
 
     assert await db.fetchval("select count(*) from project_resources") == 0
 
@@ -559,6 +845,60 @@ async def test_malformed_path_uuid_is_422(db, login):
     assert response.status_code == 422, response.text
 
 
+async def test_malformed_resource_uuid_is_422(db, login):
+    project_id, owner = await active(login)
+
+    patched = await owner.patch(f"/api/projects/{project_id}/resources/not-a-uuid", json={})
+    deleted = await owner.delete(f"/api/projects/{project_id}/resources/not-a-uuid")
+
+    assert [patched.status_code, deleted.status_code] == [422, 422]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"content": b"{not json", "headers": {"content-type": "application/json"}}, id="壞 JSON"),
+        pytest.param({"content": b'{"label": "L", "type": "github", "url": "https://a.b"}'}, id="缺 Content-Type"),
+        pytest.param({"json": {**GITHUB, "label": 123}}, id="型別錯"),
+        pytest.param({"json": {**GITHUB, "label": None}}, id="明確 null"),
+    ],
+)
+async def test_malformed_create_bodies_are_422(db, login, body):
+    project_id, owner = await active(login)
+
+    response = await owner.post(f"/api/projects/{project_id}/resources", **body)
+
+    assert response.status_code == 422, response.text
+    assert await db.fetchval("select count(*) from project_resources") == 0
+
+
+async def test_create_ignores_unknown_fields(db, login):
+    """未知欄位靜默忽略（R3）。`id` 帶進來不會變成那一列的 id。"""
+    project_id, owner = await active(login)
+    intruder = str(uuid.uuid4())
+
+    created = await add(owner, project_id, id=intruder, created_at="2000-01-01T00:00:00Z", nonsense=1)
+
+    assert created["id"] != intruder
+    assert not created["created_at"].startswith("2000")
+    assert await db.fetchval(
+        "select count(*) from project_resources where id = $1", uuid.UUID(intruder)
+    ) == 0
+
+
+async def test_type_check_is_enforced_by_the_database_itself(db, login):
+    """schema 不變式：應用層的 enum 先擋掉了，所以 API 永遠碰不到這個 check。
+    直接寫 SQL 驗，比照下面外鍵與 cascade 的做法。"""
+    project_id, _owner = await active(login)
+
+    with pytest.raises(asyncpg.CheckViolationError):
+        await db.execute(
+            "insert into project_resources (project_id, label, type, url) "
+            "values ($1, 'x', 'other', 'https://example.com')",
+            uuid.UUID(project_id),
+        )
+
+
 # --------------------------------------------- 上限 50 筆與並行（R6 / R10）
 
 
@@ -579,84 +919,157 @@ async def test_concurrent_creates_cannot_exceed_the_limit(db, login):
     """**循序測不出來的那一條。** 49 筆的狀態下五個請求同時進來，如果計數與
     寫入不是在同一把鎖之後，五個都會讀到 49、五個都會寫進去。
 
+    不靠「剛好同時」：另一條連線先鎖住 project 列，確認五個請求都卡在鎖上
+    才放手。放手之後它們一個一個拿到鎖 —— 這時候如果計數跟鎖寫在同一句，
+    那一句的快照在等鎖之前就拍好了，五個都會看到 49（見 project_resources.py 檔頭）。
+
     恰好一個成功，其餘 409，資料庫裡不多不少 50 筆。
     """
     project_id, owner = await active(login)
-    for i in range(49):
-        await add(owner, project_id, label=f"第 {i} 筆")
-
-    responses = await asyncio.gather(
-        *(
-            owner.post(f"/api/projects/{project_id}/resources", json=GITHUB)
-            for _ in range(5)
-        )
+    await db.execute(
+        "insert into project_resources (project_id, label, type, url) "
+        "select $1, '第 ' || n || ' 筆', 'github', 'https://example.com' "
+        "from generate_series(1, 49) as n",
+        uuid.UUID(project_id),
     )
 
-    codes = sorted(r.status_code for r in responses)
+    async with RowHolder(db) as holder:
+        await holder.conn.execute(
+            "select id from projects where id = $1 for update", uuid.UUID(project_id)
+        )
+        tasks = [
+            asyncio.create_task(
+                owner.post(f"/api/projects/{project_id}/resources", json=GITHUB)
+            )
+            for _ in range(5)
+        ]
+        await wait_until_blocked(db, 5, tasks)
+        await holder.rollback()
+
+    codes = sorted(r.status_code for r in await asyncio.gather(*tasks))
     assert codes.count(201) == 1, f"應該恰好一個成功，實際 {codes}"
     assert codes.count(409) == 4, f"其餘都該是 409，實際 {codes}"
     assert await db.fetchval("select count(*) from project_resources") == 50
 
 
-async def test_a_write_waits_for_whoever_holds_the_project_row(db, login):
-    """寫入端點真的有鎖住 project 列 —— 不是只有「看起來像」。
+WRITES = {
+    "POST": lambda client, project_id, resource_id: client.post(
+        f"/api/projects/{project_id}/resources", json=GITHUB
+    ),
+    "PATCH": lambda client, project_id, resource_id: client.patch(
+        path(project_id, resource_id), json={"label": "改"}
+    ),
+    "DELETE": lambda client, project_id, resource_id: client.delete(
+        path(project_id, resource_id)
+    ),
+}
+SUCCESS = {"POST": 201, "PATCH": 200, "DELETE": 204}
 
-    另一條連線先把那一列鎖住，這時候發出的 POST 必須**等**。等不到就代表
-    寫入路徑沒有拿鎖，那麼 close 與寫入就可能交錯（結案之後還寫得進東西）。
 
-    做法：拿一條獨立連線開交易並 `SELECT … FOR UPDATE`，然後給 POST 一個很短
-    的逾時，斷言它逾時；放開鎖之後同一個請求要成功。
+@pytest.mark.parametrize("method", list(WRITES))
+async def test_a_write_waits_for_the_project_row_lock(db, login, method):
+    """寫入端點自己有鎖住 project 列 —— 不是被外鍵順便擋住。
+
+    持鎖的那一邊用 `FOR NO KEY UPDATE`，也就是 close 那句 `UPDATE projects`
+    拿的鎖。它擋得住端點的 `FOR UPDATE`，但**擋不住**外鍵檢查（`FOR KEY SHARE`）：
+    改用 `FOR UPDATE` 持鎖的話，端點就算沒有鎖，POST 也會因為外鍵而等，這條
+    就驗不到端點自己的鎖。PATCH、DELETE 不碰外鍵，沒鎖就完全不會等。
+    """
+    project_id, owner = await active(login)
+    created = await add(owner, project_id)
+
+    async with RowHolder(db) as holder:
+        await holder.conn.execute(
+            "select id from projects where id = $1 for no key update",
+            uuid.UUID(project_id),
+        )
+        task = asyncio.create_task(WRITES[method](owner, project_id, created["id"]))
+        await wait_until_blocked(db, 1, [task])
+        await holder.rollback()
+
+    # 鎖放開之後同一個請求要成功 —— 證明上面是等鎖，不是壞掉。
+    response = await task
+    assert response.status_code == SUCCESS[method], response.text
+
+
+@pytest.mark.parametrize("method", list(WRITES))
+async def test_a_write_that_queued_behind_close_is_rejected(db, login, method):
+    """順序一：close 先拿到列、寫入在後面等。close 提交之後，寫入要看到的是
+    closed —— 409，而且表上什麼都沒變。
+
+    持鎖的那一邊跑的就是 close 的那句 UPDATE，先不提交。
+    """
+    project_id, owner = await active(login)
+    created = await add(owner, project_id)
+    before = await snapshot(db)
+
+    async with RowHolder(db) as holder:
+        await holder.conn.execute(
+            "update projects set status = 'closed', updated_at = now() where id = $1",
+            uuid.UUID(project_id),
+        )
+        task = asyncio.create_task(WRITES[method](owner, project_id, created["id"]))
+        await wait_until_blocked(db, 1, [task])
+        await holder.commit()
+
+    response = await task
+    assert response.status_code == 409, response.text
+    assert_detail(response, "專案已結案，資源不能再修改")
+    assert await snapshot(db) == before
+
+
+async def test_close_that_queued_behind_a_write_lands_after_it(db, login):
+    """順序二：寫入先拿到列（鎖住並寫了一筆，還沒提交），close 在後面等。
+    寫入提交之後 close 才成功；那一筆留下來，而之後再也寫不進去。
+
+    持鎖的那一邊照端點的兩句做：先 `FOR UPDATE`，再 insert。
     """
     project_id, owner = await active(login)
 
-    holder = await db.acquire()
-    try:
-        transaction = holder.transaction()
-        await transaction.start()
-        await holder.fetchval(
+    async with RowHolder(db) as holder:
+        await holder.conn.execute(
             "select id from projects where id = $1 for update", uuid.UUID(project_id)
         )
+        await holder.conn.execute(
+            "insert into project_resources (project_id, label, type, url) "
+            "values ($1, '先寫的', 'github', 'https://example.com')",
+            uuid.UUID(project_id),
+        )
+        task = asyncio.create_task(
+            owner.post(f"/api/projects/{project_id}/close", json={})
+        )
+        await wait_until_blocked(db, 1, [task])
+        await holder.commit()
 
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(
-                owner.post(f"/api/projects/{project_id}/resources", json=GITHUB),
-                timeout=1.5,
-            )
-
-        assert (
-            await holder.fetchval("select count(*) from project_resources") == 0
-        ), "鎖沒有擋住寫入"
-        await transaction.rollback()
-    finally:
-        await db.release(holder)
-
-    # 鎖放開之後，同樣的請求要成功 —— 證明上面的逾時是等鎖，不是壞掉。
-    after = await owner.post(f"/api/projects/{project_id}/resources", json=GITHUB)
-    assert after.status_code == 201, after.text
-
-
-async def test_closing_while_writing_never_leaves_a_late_resource(db, login):
-    """close 與新增同時發生：兩種順序都可以，但結案之後不能再多出東西。
-
-    close 的 `UPDATE projects` 會跟寫入端點的鎖互相排隊，所以結果只有兩種：
-    先寫成功再結案（1 筆），或先結案再被擋（0 筆、409）。
-    """
-    project_id, owner = await active(login)
-
-    written, closed = await asyncio.gather(
-        owner.post(f"/api/projects/{project_id}/resources", json=GITHUB),
-        owner.post(f"/api/projects/{project_id}/close", json={}),
-    )
-
+    closed = await task
     assert closed.status_code == 200, closed.text
-    assert written.status_code in (201, 409), written.text
-    stored = await db.fetchval("select count(*) from project_resources")
-    assert stored == (1 if written.status_code == 201 else 0)
+    assert await db.fetchval("select count(*) from project_resources") == 1
 
-    # 結案之後，無論如何都不能再寫進來。
     late = await owner.post(f"/api/projects/{project_id}/resources", json=GITHUB)
     assert late.status_code == 409, late.text
-    assert await db.fetchval("select count(*) from project_resources") == stored
+    assert await db.fetchval("select count(*) from project_resources") == 1
+
+
+async def test_concurrent_patch_and_delete_of_one_resource(db, login):
+    """同一筆同時被改與刪：兩者排隊，結果只有兩種，而且都不是 500。
+
+    PATCH 先 → 200，DELETE 再 → 204；DELETE 先 → 204，PATCH 再 → 404。
+    """
+    project_id, owner = await active(login)
+    created = await add(owner, project_id)
+
+    async with RowHolder(db) as holder:
+        await holder.conn.execute(
+            "select id from projects where id = $1 for update", uuid.UUID(project_id)
+        )
+        patched = asyncio.create_task(WRITES["PATCH"](owner, project_id, created["id"]))
+        deleted = asyncio.create_task(WRITES["DELETE"](owner, project_id, created["id"]))
+        await wait_until_blocked(db, 2, [patched, deleted])
+        await holder.rollback()
+
+    codes = ((await patched).status_code, (await deleted).status_code)
+    assert codes in {(200, 204), (404, 204)}, codes
+    assert await db.fetchval("select count(*) from project_resources") == 0
 
 
 # ------------------------------------------------------- schema 層的不變式
