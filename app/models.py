@@ -212,3 +212,56 @@ class RoomDoorOut(BaseModel):
     project_id: uuid.UUID
     title: str
     online_count: int
+
+
+# ---------------------------------------------------------------- 專案資源
+
+# BE-G12（2026-09-16，得到授權）。Project Room 的外部連結看板。
+
+
+class ResourceType(str, enum.Enum):
+    """對應 `project_resources.type` 的 check。
+
+    鏡像資料庫的合法值，理由跟 ProjectStatus 一樣：這是有限集合，不是長度
+    規則 —— 把它留給資料庫會讓「打錯一個字」變成 500 而不是 422。
+    V1 沒有 other：未分類的連結會讓前端的 icon 推導失去意義。
+    """
+
+    github = "github"
+    figma = "figma"
+    notion = "notion"
+    drive = "drive"
+    meeting = "meeting"
+
+
+class ProjectResourceCreate(BaseModel):
+    """POST。長度與 URL scheme 刻意不在這裡驗（[P15]），由資料庫的 check 擋。"""
+
+    label: str
+    type: ResourceType
+    url: str
+
+
+class ProjectResourceUpdate(BaseModel):
+    """PATCH。未給的欄位不動，給了 null 是 422。
+
+    型別寫 `str` 而不是 `str | None`，是因為這三欄在資料庫都是 NOT NULL ——
+    「把它清空」沒有對應的合法狀態。預設值 None 只代表「這次沒給」，
+    由 `model_fields_set` 分辨，不會被當成要寫進去的值。
+
+    id / project_id / created_at 不在這裡：它們不是可以改的東西，
+    而未知欄位會被 Pydantic 靜默忽略（全 repo 都沒有設 extra）。
+    """
+
+    label: str = None  # type: ignore[assignment]
+    type: ResourceType = None  # type: ignore[assignment]
+    url: str = None  # type: ignore[assignment]
+
+
+class ProjectResourceOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    label: str
+    type: ResourceType
+    url: str
+    created_at: dt.datetime

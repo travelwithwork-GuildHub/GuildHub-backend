@@ -11,7 +11,15 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.websockets import WebSocketState
 
 from app import config, db
-from app.api import auth, messages, profiles, projects, rooms, seats
+from app.api import (
+    auth,
+    messages,
+    profiles,
+    project_resources,
+    projects,
+    rooms,
+    seats,
+)
 from app.realtime import protocol
 from app.realtime.broadcaster import Broadcaster
 from app.realtime.manager import ConnectionManager
@@ -78,6 +86,7 @@ app.include_router(projects.router)
 app.include_router(seats.router)
 app.include_router(messages.router)
 app.include_router(rooms.router)
+app.include_router(project_resources.router)
 
 
 @app.get("/health")
