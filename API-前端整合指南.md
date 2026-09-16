@@ -230,13 +230,14 @@ FastAPI 標準格式：
 
 ---
 
-## 5. REST 端點（17 個，已凍結）
+## 5. REST 端點（21 個，已凍結）
 
 端點集合由 `tests/test_contract.py` 鎖住，多一個少一個都會讓測試紅掉。
 **凍結後要改欄位，後端會先通知前端。**
 
 > 2026-09-08：L3 裁決加了 `POST /api/register`，端點從 16 個變 17 個。
-> 這是凍結後唯一一次加端點，且先有裁決才改表。
+> 2026-09-16：BE-G12 加了 Project Resources 的 4 個（§5.7），17 → 21。
+> 兩次都是先有裁決才改表，而且既有端點的行為沒有跟著變。
 
 分頁一律 `?page=`，**每頁 20 筆，從 0 開始**。翻過尾頁回 `[]`（不是 404）。
 回應沒有 total count，前端請以「回傳筆數 < 20」判斷已到底。
@@ -392,6 +393,62 @@ GET /api/rooms
 它不會透過 WebSocket 推播，前端若要更新走廊人數，需要自行輪詢（建議 5–10 秒一次）。
 
 門的排列是一維的：`x = index × 間距`，**照回傳順序擺即可**，沒有版面演算法。
+
+### 5.7 專案資源（Project Resources）★ 2026-09-16 新增
+
+Project Room 裡的外部連結看板。**獨立的表與端點，`ProjectOut` 沒有新欄位。**
+
+| Method | Path | 主體 | 說明 |
+|---|---|---|---|
+| GET | `/api/projects/{project_id}/resources` | 發起人，或**已進房**的人 | → `ProjectResourceOut[]`，依 `created_at, id` 由舊到新。**不分頁**（上限 50 筆）；沒有就 `[]` |
+| POST | `/api/projects/{project_id}/resources` | **發起人** | body `{label, type, url}` → **201** `ProjectResourceOut` |
+| PATCH | `/api/projects/{project_id}/resources/{resource_id}` | **發起人** | 三欄皆選填，未給的不動；送 `{}` 回 200 原樣 |
+| DELETE | `/api/projects/{project_id}/resources/{resource_id}` | **發起人** | → **204**，沒有 body |
+
+```jsonc
+// ProjectResourceOut
+{
+  "id": "uuid",
+  "project_id": "uuid",
+  "label": "Repository",
+  "type": "github",        // github | figma | notion | drive | meeting
+  "url": "https://github.com/org/repo",
+  "created_at": "2026-09-16T10:00:00Z"
+}
+```
+
+**房間票只給讀取權。** 拿到 `room_token` 代表通過房間密碼，**不代表可以新增或
+修改資源** —— 寫入一律只有發起人（沒有成員制，§6.2）。非發起人寫入是 403。
+
+**狀態決定寫不寫得動：**
+
+| 專案狀態 | 發起人讀 | 其他人讀 | 任何人寫 |
+|---|---|---|---|
+| `recruiting` | 200 `[]` | 403 | **409** |
+| `active` | 200 | 進房了 200，沒進房 403 | 發起人成功，其他人 403 |
+| `closed` | 200（資源不會消失） | **403**（就算手上還有票） | **409** |
+
+> 結案之後 `/enter` 仍然換得到票（`close` 不清 `password_hash`），所以
+> **不要用「拿得到票」判斷房間還開著**。資源端點自己查狀態。
+
+**錯誤碼：**
+
+| 情況 | 回應 |
+|---|---|
+| 未登入 | 401 |
+| 專案不存在；資源不存在或不屬於這個專案 | 404 |
+| 非發起人寫入 | 403 |
+| 狀態不允許寫入（`recruiting`／`closed`）、第 51 筆 | **409** |
+| 缺欄位、型別錯、`type` 不在五種之內、明確送 `null` | 422 |
+| `label`／`url` 超長、`url` 不是 `http(s)://`、`label` 只有空白 | **500 text/plain**（資料庫 check，見 §8） |
+| 未知欄位（含 `id`、`project_id`、`created_at`） | 靜默忽略，值不會被改到 |
+
+**前端要自己擋的：** `label` 1–100 字、`url` 1–2048 字（算 code point）、
+scheme 只放行 http／https、一個專案最多 50 筆。同一個 URL 可以重複，**刻意不去重**。
+
+**沒有的東西**：排序端點／`sort_order`、`updated_at`、軟刪除、`other` 類型、
+單筆 GET、PUT。洽談用的一次性 Meeting URL 不在這裡（那是另一個缺口），
+這裡的 `meeting` 是使用者自己貼的常設會議室連結。
 
 ---
 
