@@ -30,7 +30,8 @@ room token 是「我通過了房間密碼」，不是「我可以改這個專案
 **鎖與計數不能擠在同一句。** PostgreSQL 預設的 Read Committed 下，同一句
 SQL 的計數沿用這句開始時的快照，看不到等鎖期間別人剛提交的列 —— 上限照樣
 會被突破。所以是同一個交易裡的兩句：第一句鎖，第二句才計數與寫入。
-`tests/test_project_resources.py` 的兩條並行測試盯著這件事。
+`tests/test_project_resources.py` 的並行測試由另一條連線持鎖、確認請求都在
+等才放手，所以拿掉鎖、或把計數併進鎖那句，都一定會紅。
 
 `/close` 端點不必改：它的 `UPDATE projects` 本來就會跟這把鎖互相排隊。
 

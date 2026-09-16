@@ -229,7 +229,7 @@ sendMove(x, y, facing)   // 自行節流至 10 Hz
 | 401 | 未登入 |
 | 403 | 非發起人操作 owner-only 端點；房間密碼錯誤 |
 | 404 | 專案／名片不存在 |
-| **409** | **座位已被佔用（由 `seats` PK 衝突觸發，不在應用層判斷）；一人佔兩格（unique 衝突）** |
+| **409** | **座位已被佔用（由 `seats` PK 衝突觸發，不在應用層判斷）；一人佔兩格（unique 衝突）**；專案資源在 `recruiting`／`closed` 時寫入、或已滿 50 筆（`project_resources.py`，鎖住 project 列後判斷） |
 | 422 | Pydantic 驗證失敗（FastAPI 預設，不必自己處理） |
 | 400 | `room_ready` check 擋下的成軍請求（未附密碼） |
 
