@@ -66,10 +66,12 @@ SCHEMA_TABLES = parse_schema()
 # --------------------------------------------------------------------- schema
 
 
-def test_schema_defines_exactly_the_four_tables():
-    """守則 §1 規則 3：禁止建立規格書 §4 之外的資料表。"""
-    assert set(SCHEMA_TABLES) == SPEC_TABLES
+def test_schema_defines_exactly_the_declared_tables():
+    """守則 §1 規則 3：禁止建立規格書 §4 與後續裁決之外的資料表。
 
+    2026-09-16 的 BE-G12 加了第五張表 project_resources。
+    """
+    assert set(SCHEMA_TABLES) == SPEC_TABLES
 
 @pytest.mark.parametrize("table", sorted(SPEC_TABLES))
 def test_every_table_has_columns(table):
