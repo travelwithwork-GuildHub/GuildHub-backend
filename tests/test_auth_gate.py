@@ -20,6 +20,7 @@ from app.main import app
 PROJECT = uuid.uuid4()
 PROFILE = uuid.uuid4()
 RESOURCE = uuid.uuid4()
+MESSAGE = uuid.uuid4()
 
 # 附錄 B 的全部端點，扣掉公開的 /api/login。附帶合法 body，讓唯一的失敗理由
 # 是「沒登入」而不是「body 不合法」。
@@ -52,6 +53,8 @@ PROTECTED = [
         {"url": "https://example.com/new"},
     ),
     ("DELETE", f"/api/projects/{PROJECT}/resources/{RESOURCE}", None),
+    # [BE-G35] 標記已讀（2026-09-19）。只追加，既有各列沒動。
+    ("POST", f"/api/messages/{MESSAGE}/read", None),
 ]
 
 

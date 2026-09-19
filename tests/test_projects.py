@@ -245,3 +245,120 @@ async def test_room_enter_before_the_team_is_formed_is_404(db, login):
         f"/api/projects/{project_id}/enter", json={"password": PASSWORD}
     )
     assert response.status_code == 404
+
+
+# ------------------------------------------- [BE-G31] 結案的案子不能再成軍
+#
+# 前端 2026-09-19 的清單第 1.2 條：對 closed 的案子打 form-team 回 200，
+# status 回到 active，GET /api/rooms 又列出這扇門 —— 也就是「結案」可以被
+# 發起人無限次撤銷。form_team() 的 update 沒有帶狀態條件，require_owner
+# 也只驗 owner 不驗狀態。
+#
+# 裁決（2026-09-19）：recruiting 與 active 都允許，closed 擋。
+# active 再成軍 = 換密碼，那是前端 FE-J04 正在用的行為，**不是漏網之魚**：
+# 被砍掉的是獨立的 reset-password 端點，不是這個行為。下面第二條測試就是
+# 用來擋「哪天有人順手把 active 也收緊」的。
+
+
+async def test_forming_a_team_twice_still_rotates_the_password(db, login):
+    """active 再成軍 = 換密碼，維持 200。這是受保護的行為，不是 bug。"""
+    owner = await login("發起人")
+    project_id = await new_project(owner)
+    await owner.post(f"/api/projects/{project_id}/form-team", json={"password": PASSWORD})
+
+    again = await owner.post(
+        f"/api/projects/{project_id}/form-team", json={"password": "newpass123"}
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "active"
+
+    member = await login("拿舊密碼的")
+    with_old = await member.post(
+        f"/api/projects/{project_id}/enter", json={"password": PASSWORD}
+    )
+    assert with_old.status_code == 403, "舊密碼必須失效，否則換密碼沒有意義"
+
+    with_new = await member.post(
+        f"/api/projects/{project_id}/enter", json={"password": "newpass123"}
+    )
+    assert with_new.status_code == 200, with_new.text
+
+
+async def test_a_closed_project_cannot_be_resurrected(db, login):
+    """第 1.2 條本身：結案之後不得再被成軍。"""
+    owner = await login("發起人")
+    project_id = await new_project(owner)
+    await owner.post(f"/api/projects/{project_id}/form-team", json={"password": PASSWORD})
+    closed = await owner.post(f"/api/projects/{project_id}/close", json={})
+    assert closed.status_code == 200, closed.text
+
+    response = await owner.post(
+        f"/api/projects/{project_id}/form-team", json={"password": PASSWORD}
+    )
+
+    assert response.status_code == 409, f"回了 {response.status_code}：{response.text}"
+    assert response.json()["code"] == "project_closed"
+
+    still = await owner.get(f"/api/projects/{project_id}")
+    assert still.json()["status"] == "closed", "狀態不得被那次失敗的請求改掉"
+
+
+async def test_a_closed_project_stays_off_the_corridor(db, login):
+    """門從走廊移除（§6.1）之後，不得因為一次 form-team 又長回來。"""
+    owner = await login("發起人")
+    project_id = await new_project(owner)
+    await owner.post(f"/api/projects/{project_id}/form-team", json={"password": PASSWORD})
+    await owner.post(f"/api/projects/{project_id}/close", json={})
+
+    await owner.post(f"/api/projects/{project_id}/form-team", json={"password": PASSWORD})
+
+    doors = await owner.get("/api/rooms")
+    assert project_id not in [d["project_id"] for d in doors.json()]
+
+
+# --------------------------------------------- [BE-G33] 房間密碼的長度下限
+#
+# 前端清單第 1.6 條（他們自己標「可選」）：3 個字的密碼也 200。
+#
+# 這一條是全案**唯一**該寫在 Pydantic 的長度規則 —— 明文密碼不會進資料庫，
+# SQL 無從驗起（models.py 的 RegisterIn.password 早就是這樣，註解裡寫明它是
+# 「不得在應用層重複實作長度檢查」的唯一例外）。所以它回 422，不是 400。
+
+
+@pytest.mark.parametrize("password", ["", "abc", "x" * 65])
+async def test_room_password_length_is_enforced(db, login, password):
+    owner = await login("發起人")
+    project_id = await new_project(owner)
+
+    response = await owner.post(
+        f"/api/projects/{project_id}/form-team", json={"password": password}
+    )
+
+    assert response.status_code == 422, f"回了 {response.status_code}：{response.text}"
+
+
+@pytest.mark.parametrize("password", ["1234", "x" * 64])
+async def test_room_password_boundaries_are_allowed(db, login, password):
+    """4 與 64 是上下限本身，必須過 —— 數字跟前端 limits.ts 同源。"""
+    owner = await login("發起人")
+    project_id = await new_project(owner)
+
+    response = await owner.post(
+        f"/api/projects/{project_id}/form-team", json={"password": password}
+    )
+
+    assert response.status_code == 200, response.text
+
+
+async def test_account_password_keeps_its_own_longer_minimum(db, api):
+    """房間密碼放寬到 4，不得把帳號密碼一起放寬。
+
+    passwords.py 的 docstring：兩種密碼共用雜湊函式沒問題，共用心智模型會
+    出事。房間密碼是口頭傳的共享密碼，帳號密碼保護的是一個身分。
+    """
+    response = await api.post(
+        "/api/register",
+        json={"login_id": "shortpw", "password": "1234", "nickname": "短密碼"},
+    )
+
+    assert response.status_code == 422
