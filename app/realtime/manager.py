@@ -30,7 +30,15 @@ log = logging.getLogger("guildhub.realtime")
 class Connection:
     """一條 WS 連線。用預設的 identity hash —— 同一個人開兩個分頁是兩條連線。"""
 
-    __slots__ = ("ws", "user_id", "name", "scene", "connected_at")
+    __slots__ = (
+        "ws",
+        "user_id",
+        "name",
+        "scene",
+        "connected_at",
+        "chat_window_start",
+        "chat_count",
+    )
 
     def __init__(self, ws: WebSocket, user_id: str, name: str, scene: str):
         self.ws = ws
@@ -38,6 +46,12 @@ class Connection:
         self.name = name
         self.scene = scene
         self.connected_at = time.monotonic()
+
+        # [BE-G36] chat 節流的額度。放在連線上而不是 broadcaster 的 dict 裡：
+        # 連線死掉時額度跟著消失，不需要清理程式碼，也不會有「斷線了但 key
+        # 還在」的洩漏。判斷邏輯在 Broadcaster._chat_allowed。
+        self.chat_window_start = 0.0
+        self.chat_count = 0
 
     def __repr__(self):
         return f"Connection({self.name}@{self.scene})"

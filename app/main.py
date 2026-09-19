@@ -200,7 +200,10 @@ async def ws_endpoint(ws: WebSocket, scene: str = "lobby", token: str | None = N
                 )
             elif isinstance(msg, protocol.ChatIn):
                 # §3.4：純廣播，不落地。這裡沒有任何寫入動作是刻意的。
-                await broadcaster.relay_chat(conn.scene, user_id, name, msg.body)
+                # [BE-G36]：長度與每連線的額度在 relay_chat 裡判斷，超過就
+                # 靜默丟棄（附錄 A.2），連線不關 —— 在發表現場把人踢下線，
+                # 他的角色會從世界裡消失，看起來就像系統壞了。
+                await broadcaster.relay_chat(conn, msg.body)
     except WebSocketDisconnect:
         pass
     except RuntimeError:
