@@ -72,12 +72,18 @@ app.add_middleware(
 #
 # 前後端同源部署時 CORS_ORIGINS 會是空的，這個 middleware 就不放行任何跨源
 # 請求 —— 同源請求本來就不經過它，行為正確。
+#
+# expose_headers（[BE-G34]）：跨源時瀏覽器只讓 JavaScript 讀到白名單上的
+# 回應 header，其他一律藏起來 —— header 確實送到了，fetch 那邊卻是 undefined。
+# 正式站前後端同源不受影響；擋的是前端 `next dev -p 3100` 打本機 8000 的
+# 情況，那時「我的案件」的總數會是 undefined，而後端日誌什麼都看不到。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Total-Count"],
 )
 
 # [P23] 路由組裝。只掛附錄 B 列出的端點，一個不多 —— tests/test_contract.py

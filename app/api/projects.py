@@ -6,9 +6,10 @@
 
 import random
 import uuid
+from typing import Literal
 
 import asyncpg
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 
 from app import db, room_token
 from app.errors import ApiError
@@ -62,24 +63,84 @@ async def create_project(
 
 @router.get("", response_model=list[ProjectOut])
 async def list_projects(
-    status: ProjectStatus = ProjectStatus.recruiting,
+    response: Response,
+    status: ProjectStatus | Literal["all"] = ProjectStatus.recruiting,
+    owner_id: uuid.UUID | None = None,
     page: int = 0,
-    _me: uuid.UUID = Depends(get_current_user),
+    me: uuid.UUID = Depends(get_current_user),
 ) -> list[ProjectOut]:
     """[P20] 任務看板。過期的不出現。
 
     只在查詢時過濾，不實作到期排程與提醒（守則 §3：貼文到期提醒、續期、
     自動下架排程已砍除）。「自動下架」因此是查詢的結果，不是背景工作 ——
     少了一個排程器，也少了一種會在半夜壞掉的東西。
+
+    ## [BE-G34]「我的案件」（2026-09-19，前端清單 2.2）
+
+    前端 FE-J03 要列出「我發的所有案子」，含 active 與 closed。在這之前只能
+    用 status 篩，所以他們得對三種狀態各翻多頁、再在前端過濾 owner_id ——
+    每頁 20 筆又沒有總數，只能一直翻到空頁為止。
+
+    三件事一起加，但**回應形狀一個字都沒變**：
+
+      · owner_id：可與 status 組合
+      · status=all：新增的值。**預設值仍然是 recruiting** —— 前端第 3 節把
+        「不帶 status 只回 recruiting」釘成契約，改預設值會弄壞看板與房間門
+      · 總數走 X-Total-Count header
+
+    總數為什麼是 header 而不是把回應改成 {items, total, has_more}：這個端點
+    同時餵著任務看板與走廊的門，形狀一改前後端必須同一天上線，而發表前兩邊
+    各只剩一個部署窗口。header 是加法，前端的契約 schema 不用動。
+
+    has_more 不另外回：(page + 1) * PAGE_SIZE < total 就是它。多一個欄位就多
+    一種跟 total 互相矛盾的可能。
+
+    ## 為什麼自己查自己時不套 expires_at
+
+    「過期就下架」對看板是對的，對發起人自己的清單是把他的東西弄丟 —— 貼文
+    過期的那一刻，他的案子會從「我的案件」消失，但案子還在、房間還開著。
+    所以只有在查的不是自己的東西時才套這個過濾。
+
+    ## 排序為什麼補第二鍵
+
+    updated_at 來自 now() 的預設值，同一批建立的案子時間戳會相同。只用
+    updated_at 排序時 PostgreSQL 對相同鍵的順序不保證穩定，翻頁就會有筆重複
+    出現、有筆永遠看不到。資料量小時幾乎不會發作 —— 這種 bug 會在資料變多
+    的那天才出現，而那天通常是發表當天。
     """
+    conditions: list[str] = []
+    args: list = []
+
+    if status != "all":
+        args.append(status.value)
+        conditions.append(f"status = ${len(args)}")
+
+    if owner_id is not None:
+        args.append(owner_id)
+        conditions.append(f"owner_id = ${len(args)}")
+
+    # 查的不是自己的東西時才套下架過濾。owner_id 是 None（看板）也算。
+    if owner_id != me:
+        conditions.append("expires_at > now()")
+
+    where = " and ".join(conditions) if conditions else "true"
+
+    # 總數與清單共用同一組條件與參數 —— 分開寫兩份 where 的話，哪天改了一邊
+    # 就會出現「總數說有 37 筆，翻到底只有 20 筆」。
+    total = await db.pool().fetchval(
+        f"select count(*) from projects where {where}", *args
+    )
     rows = await db.pool().fetch(
-        f"select {_COLUMNS} from projects "
-        "where status = $1 and expires_at > now() "
-        "order by updated_at desc limit $2 offset $3",
-        status.value,
+        f"select {_COLUMNS} from projects where {where} "
+        f"order by updated_at desc, id desc limit ${len(args) + 1} offset ${len(args) + 2}",
+        *args,
         PAGE_SIZE,
         max(page, 0) * PAGE_SIZE,
     )
+
+    # 同源部署時瀏覽器讀得到；跨源時要靠 CORSMiddleware 的 expose_headers
+    # 放行（app/main.py），少了那個前端 dev 模式會讀到 undefined。
+    response.headers["X-Total-Count"] = str(total)
     return [ProjectOut(**dict(r)) for r in rows]
 
 
