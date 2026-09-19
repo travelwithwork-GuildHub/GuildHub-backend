@@ -93,8 +93,21 @@ def path(project_id: str, resource_id: str) -> str:
 
 
 def assert_detail(response, expected: str) -> None:
-    """4xx 的 body 形狀是 `{"detail": 中文字串}`（422 除外，那是 Pydantic 的陣列）。"""
-    assert response.json() == {"detail": expected}, response.text
+    """4xx 的 body 帶 `detail`（中文字串）與 `code`（422 除外，那是 Pydantic 的陣列）。
+
+    ## 2026-09-19 [BE-G29] 裁決破例：改了這個 helper（影響本檔 15 條測試）
+
+    原本是 `response.json() == {"detail": expected}` —— 整個 body 完全相等。
+    [BE-G29] 在每個錯誤回應的最外層加了 `code`（前端清單 1.4：兩種 409 只能
+    靠中文字串分辨），所以嚴格相等會擋下一個**加法**的變更。
+
+    改成比對 `detail` 欄位本身：文案仍然一字不能差（這才是這些測試在釘的
+    東西 —— 錯誤訊息要講對事情），但 body 可以多欄位。同時順便釘住 `code`
+    一定存在，否則「加了 code」這件事在這個檔案裡就沒有人看著。
+    """
+    body = response.json()
+    assert body["detail"] == expected, response.text
+    assert body.get("code"), f"4xx 必須帶 code：{response.text}"
 
 
 async def snapshot(db) -> list[dict]:
@@ -108,11 +121,25 @@ async def snapshot(db) -> list[dict]:
 
 
 async def expect_database_error(client, method: str, url: str, **kwargs) -> None:
-    """資料庫 check 擋下的請求：對外是 500 text/plain，不是 422。
+    """資料庫 check 擋下的請求：對外是 400 ＋ `code`，不是 422、也不再是 500。
 
     測試用的 client 預設把 app 內的例外直接拋出來（`raise_app_exceptions`），
     那樣只能寫 `pytest.raises(Exception)`，任何例外都算過。這裡另開一個不拋的
     client、沿用同一組 cookie，斷言真正送到前端的回應。
+
+    ## 2026-09-19 [BE-G30] 裁決破例：改了這個 helper（影響本檔 7 條測試）
+
+    這個 helper 原本斷言 `500 text/plain "Internal Server Error"` —— 那記錄的
+    是**當時的行為**（沒有人接住 asyncpg.CheckViolationError，例外一路噴到
+    ASGI 外面），不是一條規格。101 字的標籤是使用者輸入，回 500 是缺陷。
+
+    [BE-G29] 在 app/main.py 掛了集中的 handler，這一類一律 400 ＋ code，code
+    就是 constraint 的名稱。破例的完整範圍與理由見該 commit；這裡與
+    test_profiles.py、test_messages.py 的兩條是同一次裁決。
+
+    **每條測試自己的主題一字未動**：101 字的標籤仍然要被擋、只有空白的標籤
+    仍然要被擋、`javascript:` 仍然不得進資料庫。改的只是那個「被擋」長什麼
+    樣子。
     """
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
@@ -121,9 +148,10 @@ async def expect_database_error(client, method: str, url: str, **kwargs) -> None
     ) as raw:
         response = await raw.request(method, url, **kwargs)
 
-    assert response.status_code == 500, response.text
-    assert response.headers["content-type"] == "text/plain; charset=utf-8"
-    assert response.text == "Internal Server Error"
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"], f"資料庫 check 的回應必須帶 code：{response.text}"
+    assert body["detail"], response.text
 
 
 async def wait_until_blocked(db, count: int, tasks) -> None:
