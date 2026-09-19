@@ -5,6 +5,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app import db
+from app.errors import ApiError
 from app.deps import get_current_user
 from app.models import ProfileOut, ProfileUpdate
 
@@ -39,8 +40,14 @@ async def update_me(
     """[P15]。未給的欄位不動。
 
     長度上限交給資料庫的 check 擋（守則 §1 規則 3 與任務表 [P15]：禁止在
-    應用層重複實作長度檢查）。因此超長會是 500 而不是 422 —— 這是刻意的，
-    真正的規則只有一份，寫在 sql/001_schema.sql。
+    應用層重複實作長度檢查）。因此超長**不會是 422** —— 422 代表規則被搬進
+    了 Pydantic，而真正的規則只有一份，寫在 sql/001_schema.sql。
+
+    2026-09-19 [BE-G30]：超長從 500 改成 400 ＋ `code`（前端清單 1.5）。
+    在此之前沒有人接住 asyncpg.CheckViolationError，例外一路噴到 ASGI 外面，
+    所以 21 字的暱稱登入會噴 traceback —— 而登入是演示的第一步。轉碼的地方
+    是 app/main.py 的集中 handler，不是這裡：規則的位置沒有變，變的只是
+    資料庫的答案怎麼翻譯成 HTTP。
     """
     fields = payload.model_dump(exclude_unset=True)
     if not fields:
@@ -81,5 +88,5 @@ async def get_profile(
 ) -> ProfileOut:
     row = await db.pool().fetchrow("select * from profiles where id = $1", profile_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="名片不存在")
+        raise ApiError(404, "profile_not_found", "名片不存在")
     return ProfileOut(**dict(row))

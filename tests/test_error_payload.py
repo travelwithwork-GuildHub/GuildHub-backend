@@ -141,13 +141,34 @@ async def test_400_for_a_seat_beyond_the_room_carries_a_code(db, login):
     assert "2" in response.json()["detail"], "訊息要含座位數，前端 FE-J13 靠它"
 
 
-async def test_400_for_a_seat_outside_the_table_carries_a_code(db, login):
-    """seat_index >= 8 —— 由 seats.seat_in_range 擋，不是容量問題。"""
+async def test_400_for_a_negative_seat_carries_a_code(db, login):
+    """seat_index < 0 —— 由 seats.seat_in_range 擋，不是容量問題。
+
+    ## 為什麼是負數而不是 8
+
+    [BE-G28] 之後 seat_count 的上限就是 8，所以 seat_index >= 8 一定也
+    >= seat_count，會先在容量那一關（INSERT ... SELECT 的 where）被擋下，
+    永遠走不到資料庫的 seat_in_range。負數是唯一還過得了容量檢查
+    （-1 < seat_count 成立）、然後才撞上 seat_in_range 的輸入。
+
+    也就是說 seats.py 那段 `except asyncpg.CheckViolationError` 現在只剩
+    負數這一條路會走到；它同時仍然是直接寫資料庫時的兜底。
+    """
     project_id, _owner = await open_room(login)
-    _client, response = await seated(login, project_id, "坐到牆外的", 8)
+    _client, response = await seated(login, project_id, "坐到牆外的", -1)
 
     assert response.status_code == 400
     assert response.json()["code"] == "seat_out_of_range"
+
+
+async def test_a_seat_index_of_eight_is_a_capacity_error_now(db, login):
+    """8 這個值的歸屬釘在這裡，免得日後有人以為它該回 seat_out_of_range。"""
+    project_id, _owner = await open_room(login, seat_count=8)
+    _client, response = await seated(login, project_id, "坐到牆外的", 8)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "seat_beyond_seat_count"
+    assert "8" in response.json()["detail"]
 
 
 async def test_400_for_sending_a_message_to_yourself_carries_a_code(db, login):

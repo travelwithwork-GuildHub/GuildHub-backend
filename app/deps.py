@@ -7,7 +7,9 @@
 
 import uuid
 
-from fastapi import Depends, HTTPException, Path, Request
+from fastapi import Depends, Path, Request
+
+from app.errors import ApiError
 
 from app import db, room_token
 
@@ -16,7 +18,7 @@ async def get_current_user(request: Request) -> uuid.UUID:
     """[P13]。未登入回 401。"""
     raw = request.session.get("user_id")
     if not raw:
-        raise HTTPException(status_code=401, detail="未登入")
+        raise ApiError(401, "not_logged_in", "未登入")
     return uuid.UUID(raw)
 
 
@@ -32,9 +34,9 @@ async def require_owner(
         "select owner_id from projects where id = $1", project_id
     )
     if owner_id is None:
-        raise HTTPException(status_code=404, detail="專案不存在")
+        raise ApiError(404, "project_not_found", "專案不存在")
     if owner_id != me:
-        raise HTTPException(status_code=403, detail="只有發起人可以做這件事")
+        raise ApiError(403, "not_owner", "只有發起人可以做這件事")
     return project_id
 
 
@@ -51,10 +53,10 @@ async def require_room_token(
     try:
         claims = room_token.verify(token)
     except room_token.InvalidRoomToken as exc:
-        raise HTTPException(status_code=403, detail="尚未通過房間密碼驗證") from exc
+        raise ApiError(403, "no_room_token", "尚未通過房間密碼驗證") from exc
 
     if claims.project_id != str(project_id):
-        raise HTTPException(status_code=403, detail="token 不屬於這個房間")
+        raise ApiError(403, "token_not_for_this_room", "token 不屬於這個房間")
 
     # token 裡就帶著簽發對象，比一下沒有代價。
     #
@@ -62,6 +64,6 @@ async def require_room_token(
     # 拿到的一定是自己的。它防的是未來：哪天有人加了「從 header 或 body 收
     # room token」的端點，少了這一行就會變成可以借用別人的票。
     if claims.user_id != str(me):
-        raise HTTPException(status_code=403, detail="token 不屬於你")
+        raise ApiError(403, "token_not_yours", "token 不屬於你")
 
     return project_id

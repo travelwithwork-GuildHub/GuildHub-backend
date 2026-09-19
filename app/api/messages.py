@@ -25,9 +25,10 @@ tests/test_contract.py 有一個測試盯著這兩個端點不存在。
 import uuid
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from app import db
+from app.errors import ApiError
 from app.deps import get_current_user
 from app.models import MessageCreate, MessageOut
 
@@ -52,10 +53,10 @@ async def send_message(
         )
     except asyncpg.CheckViolationError as exc:
         if "no_self_send" in (exc.constraint_name or ""):
-            raise HTTPException(status_code=400, detail="不能寄信給自己") from exc
+            raise ApiError(400, "no_self_send", "不能寄信給自己") from exc
         raise
     except asyncpg.ForeignKeyViolationError as exc:
-        raise HTTPException(status_code=404, detail="收件人不存在") from exc
+        raise ApiError(404, "recipient_not_found", "收件人不存在") from exc
 
     return MessageOut(**dict(row))
 

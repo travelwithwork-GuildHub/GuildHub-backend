@@ -8,9 +8,10 @@ import random
 import uuid
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 
 from app import db, room_token
+from app.errors import ApiError
 from app.deps import get_current_user, require_owner
 from app.passwords import hash_password, verify_password
 from app.models import (
@@ -92,7 +93,7 @@ async def get_project(
         f"select {_COLUMNS} from projects where id = $1", project_id
     )
     if row is None:
-        raise HTTPException(status_code=404, detail="專案不存在")
+        raise ApiError(404, "project_not_found", "專案不存在")
     return ProjectOut(**dict(row))
 
 
@@ -121,7 +122,7 @@ async def form_team(
         )
     except asyncpg.CheckViolationError as exc:
         # room_ready 擋下的成軍請求 → 400（附錄 C）
-        raise HTTPException(status_code=400, detail="房間未備妥，無法成軍") from exc
+        raise ApiError(400, "room_ready", "房間未備妥，無法成軍") from exc
     return ProjectOut(**dict(row))
 
 
@@ -174,9 +175,9 @@ async def enter_room(
         "select password_hash from projects where id = $1", project_id
     )
     if stored is None:
-        raise HTTPException(status_code=404, detail="專案不存在或房間尚未開啟")
+        raise ApiError(404, "room_not_open", "專案不存在或房間尚未開啟")
     if not verify_password(payload.password, stored):
-        raise HTTPException(status_code=403, detail="房間密碼錯誤")
+        raise ApiError(403, "wrong_password", "房間密碼錯誤")
 
     token = room_token.issue(str(project_id), str(me))
     tokens = dict(request.session.get("room_tokens") or {})

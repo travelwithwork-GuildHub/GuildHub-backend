@@ -17,9 +17,10 @@
 import uuid
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from app import db
+from app.errors import ApiError
 from app.deps import get_current_user, require_room_token
 from app.models import SeatClaim, SeatOut
 
@@ -91,17 +92,17 @@ async def claim_seat(
             payload.desk_template,
         )
     except asyncpg.UniqueViolationError as exc:
-        detail = (
-            "你已經在這個房間有座位了"
-            if "user_id" in (exc.constraint_name or "")
-            else "這個座位已經有人了"
-        )
-        raise HTTPException(status_code=409, detail=detail) from exc
+        mine = "user_id" in (exc.constraint_name or "")
+        raise ApiError(
+            409,
+            "already_seated" if mine else "seat_taken",
+            "你已經在這個房間有座位了" if mine else "這個座位已經有人了",
+        ) from exc
     except asyncpg.CheckViolationError as exc:
         # seat_in_range：0 ≤ seat_index < 8
-        raise HTTPException(status_code=400, detail="座位編號超出範圍") from exc
+        raise ApiError(400, "seat_out_of_range", "座位編號超出範圍") from exc
     except asyncpg.ForeignKeyViolationError as exc:
-        raise HTTPException(status_code=404, detail="專案不存在") from exc
+        raise ApiError(404, "project_not_found", "專案不存在") from exc
 
     if row is None:
         # where 沒有命中，兩種可能：專案不存在，或座位編號超出這個房間的座位數。
@@ -110,10 +111,11 @@ async def claim_seat(
             "select seat_count from projects where id = $1", project_id
         )
         if seat_count is None:
-            raise HTTPException(status_code=404, detail="專案不存在")
-        raise HTTPException(
-            status_code=400,
-            detail=f"這個房間只有 {seat_count} 個座位（可選 0–{seat_count - 1}）",
+            raise ApiError(404, "project_not_found", "專案不存在")
+        raise ApiError(
+            400,
+            "seat_beyond_seat_count",
+            f"這個房間只有 {seat_count} 個座位（可選 0–{seat_count - 1}）",
         )
 
     return SeatOut(**dict(row))

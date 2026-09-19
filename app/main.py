@@ -5,12 +5,14 @@ import logging
 import uuid
 from urllib.parse import unquote
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import asyncpg
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.websockets import WebSocketState
 
-from app import config, db
+from app import config, db, errors
 from app.api import (
     auth,
     messages,
@@ -80,6 +82,50 @@ app.add_middleware(
 
 # [P23] 路由組裝。只掛附錄 B 列出的端點，一個不多 —— tests/test_contract.py
 # 會擋下任何多出來的路由。
+# ------------------------------------------------------------ [BE-G29] 錯誤
+#
+# 前端 2026-09-19 清單 1.4 與 1.5。兩個 handler 一起看才完整：
+#
+#   · 第一個把 code 加進**每一個** HTTPException 的回應 —— detail 不動，
+#     所以前端現有的字串比對全部照舊，這是加法不是換法
+#   · 第二個接住沒人處理的 asyncpg.CheckViolationError。在這之前它會一路噴到
+#     ASGI 外面變成 500：21 字的暱稱登入、2001 字的站內信都是（前端回報的
+#     是前者，後者順便修掉）
+#
+# 掛在這裡而不是各端點各寫一次 try/except：既有的顯式捕捉（no_self_send、
+# room_ready、seat_in_range、唯一鍵衝突）全部保留，它們有自己的碼與文案。
+# 這個 handler 只接漏網的 —— 所以**日後新增的任何 check 都不會再漏成 500**，
+# 最壞的情況只是訊息不夠具體。
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException):
+    """回應多一個 code 欄位。沒有 code 的（例如 profiles 的 422「未知欄位」）
+    就不加，不要硬湊一個出來 —— 422 的格式是 FastAPI 的，不是我們的。"""
+    payload = {"detail": exc.detail}
+    code = getattr(exc, "code", None)
+    if code:
+        payload["code"] = code
+    return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(asyncpg.CheckViolationError)
+async def check_violation_handler(_request: Request, exc: asyncpg.CheckViolationError):
+    """資料庫 check 擋下的請求：400，code 就是 constraint 的名稱。
+
+    刻意不是 422：422 在附錄 C 的約定是「請求本身不合法」（型別錯、欄位缺），
+    由 FastAPI 判斷；這裡是「資料庫的不變式擋下來」，跟 room_ready 的 400
+    同一類（附錄 C 最後一列）。
+
+    長度規則仍然只寫在 sql/001_schema.sql 一份 —— 這裡只是把資料庫的答案
+    翻譯成 HTTP，沒有在應用層重新實作任何一條規則（守則 §1 規則 1、[P15]）。
+    """
+    name = exc.constraint_name or "check_violation"
+    detail = errors.CHECK_VIOLATION_MESSAGES.get(name, errors.GENERIC_CHECK_VIOLATION)
+    log.info("資料庫 check 擋下請求：%s", name)
+    return JSONResponse({"detail": detail, "code": name}, status_code=400)
+
+
 app.include_router(auth.router)
 app.include_router(profiles.router)
 app.include_router(projects.router)

@@ -44,7 +44,9 @@ SQL 的計數沿用這句開始時的快照，看不到等鎖期間別人剛提�
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
+
+from app.errors import ApiError
 
 from app import db, room_token
 from app.deps import get_current_user
@@ -78,7 +80,7 @@ async def _project(project_id: uuid.UUID) -> tuple[uuid.UUID, str]:
         "select owner_id, status from projects where id = $1", project_id
     )
     if row is None:
-        raise HTTPException(status_code=404, detail="專案不存在")
+        raise ApiError(404, "project_not_found", "專案不存在")
     return row["owner_id"], row["status"]
 
 
@@ -99,7 +101,7 @@ async def list_resources(
 
     if owner_id != me:
         if status != "active" or not await _holds_a_ticket(request, project_id, me):
-            raise HTTPException(status_code=403, detail="尚未通過房間密碼驗證")
+            raise ApiError(403, "no_room_token", "尚未通過房間密碼驗證")
 
     rows = await db.pool().fetch(
         f"select {_COLUMNS} from project_resources where project_id = $1 "
@@ -129,16 +131,16 @@ async def _lock_active_project(conn, project_id: uuid.UUID, me: uuid.UUID) -> No
         "select owner_id, status from projects where id = $1", project_id
     )
     if row is None:
-        raise HTTPException(status_code=404, detail="專案不存在")
+        raise ApiError(404, "project_not_found", "專案不存在")
     if row["owner_id"] != me:
-        raise HTTPException(status_code=403, detail="只有發起人可以做這件事")
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            "專案已結案，資源不能再修改"
-            if row["status"] == "closed"
-            else "專案還沒成軍，還沒有房間可以放資源"
-        ),
+        raise ApiError(403, "not_owner", "只有發起人可以做這件事")
+    closed = row["status"] == "closed"
+    raise ApiError(
+        409,
+        "project_closed" if closed else "project_not_formed",
+        "專案已結案，資源不能再修改"
+        if closed
+        else "專案還沒成軍，還沒有房間可以放資源",
     )
 
 
@@ -171,8 +173,8 @@ async def create_resource(
             )
 
     if row is None:
-        raise HTTPException(
-            status_code=409, detail=f"一個專案最多 {MAX_RESOURCES} 筆資源"
+        raise ApiError(
+            409, "resource_limit_reached", f"一個專案最多 {MAX_RESOURCES} 筆資源"
         )
     return ProjectResourceOut(**dict(row))
 
@@ -223,7 +225,7 @@ async def update_resource(
                 )
 
     if row is None:
-        raise HTTPException(status_code=404, detail="資源不存在")
+        raise ApiError(404, "resource_not_found", "資源不存在")
     return ProjectResourceOut(**dict(row))
 
 
@@ -247,4 +249,4 @@ async def delete_resource(
             )
 
     if deleted is None:
-        raise HTTPException(status_code=404, detail="資源不存在")
+        raise ApiError(404, "resource_not_found", "資源不存在")
