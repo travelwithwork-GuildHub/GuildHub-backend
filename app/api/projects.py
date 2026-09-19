@@ -110,12 +110,29 @@ async def form_team(
     分開寫的話，中間任何一步失敗都會留下 room_ready check 擋不住的中間狀態
     —— 不，其實 check 會擋住，這正是它存在的價值：即使這裡寫錯，資料庫也
     不會讓「成軍了但房間沒開」這件事發生。
+
+    ## [BE-G31] 為什麼 where 帶狀態，以及為什麼 active 仍然放行
+
+    2026-09-19 之前這句 update 沒有狀態條件，require_owner 也只驗 owner ——
+    所以對 closed 的案子打這個端點會回 200，status 變回 active，門又出現在
+    走廊上。**「結案」可以被無限次撤銷**（前端清單 1.2）。
+
+    狀態條件寫在 where 裡而不是先 select 再判斷：兩個請求同時進來時，先查
+    再寫的版本會兩個都看到 recruiting、兩個都成軍，第二個把第一個的密碼蓋掉
+    （守則 §1 規則 4）。帶條件的 update 由資料庫決定誰贏，輸的那個 returning
+    是空的。
+
+    `active` 刻意仍然放行 —— 它就是「換密碼」，前端 FE-J04 正在用。
+    CLAUDE.md 的「不要實作的功能」裡寫的是**獨立的 reset-password 端點**已
+    砍除，不是這個行為；2026-09-19 裁決把這件事寫清楚了，所以它現在是受
+    保護的行為：要拿掉必須先通知前端。
     """
     template = random.randrange(ROOM_TEMPLATE_COUNT)
     try:
         row = await db.pool().fetchrow(
             "update projects set status = 'active', room_template = $2, "
-            f"password_hash = $3, updated_at = now() where id = $1 returning {_COLUMNS}",
+            f"password_hash = $3, updated_at = now() "
+            f"where id = $1 and status in ('recruiting', 'active') returning {_COLUMNS}",
             project_id,
             template,
             hash_password(payload.password),
@@ -123,6 +140,11 @@ async def form_team(
     except asyncpg.CheckViolationError as exc:
         # room_ready 擋下的成軍請求 → 400（附錄 C）
         raise ApiError(400, "room_ready", "房間未備妥，無法成軍") from exc
+
+    if row is None:
+        # require_owner 已經確認過專案存在且是我的，所以走到這裡只剩一種
+        # 可能：它已經結案了。不必再查一次資料庫。
+        raise ApiError(409, "project_closed", "這個專案已經結案，不能再成軍")
     return ProjectOut(**dict(row))
 
 
