@@ -158,7 +158,9 @@ python tools/run_swarm.py --n 5 --idle
 瀏覽器不收萬用字元，填了會在啟動時報錯）。前端每個請求都要帶
 `credentials: 'include'`，否則 session cookie 不會送出去，症狀是全部 401。
 
-16 個端點已凍結。清單的機器可讀版本是 `tests/test_contract.py` 的 `EXPECTED`，
+21 個端點已凍結（原本 16 個；9/8 的 L3 加了 `POST /api/register`，
+9/16 的 BE-G12 加了 Project Resources 的 4 個）。清單的機器可讀版本是
+`tests/test_contract.py` 的 `EXPECTED`，
 它會擋下任何多出來或少掉的端點；人看的版本在
 [API-前端整合指南.md](API-前端整合指南.md) §5。凍結後要改欄位必須先通知 P2。
 
@@ -227,7 +229,7 @@ sendMove(x, y, facing)   // 自行節流至 10 Hz
 | 401 | 未登入 |
 | 403 | 非發起人操作 owner-only 端點；房間密碼錯誤 |
 | 404 | 專案／名片不存在 |
-| **409** | **座位已被佔用（由 `seats` PK 衝突觸發，不在應用層判斷）；一人佔兩格（unique 衝突）** |
+| **409** | **座位已被佔用（由 `seats` PK 衝突觸發，不在應用層判斷）；一人佔兩格（unique 衝突）**；專案資源在 `recruiting`／`closed` 時寫入、或已滿 50 筆（`project_resources.py`，鎖住 project 列後判斷） |
 | 422 | Pydantic 驗證失敗（FastAPI 預設，不必自己處理） |
 | 400 | `room_ready` check 擋下的成軍請求（未附密碼） |
 

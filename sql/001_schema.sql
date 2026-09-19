@@ -75,3 +75,32 @@ create index on projects (status, expires_at);
 create index on profiles (updated_at desc);
 create index on messages (recipient_id, created_at desc);
 create index on messages (sender_id, created_at desc);
+
+-- ============ 專案資源（BE-G12，2026-09-16 得到授權加入） ============
+--
+-- Project Room 裡的外部連結看板（GitHub / Figma / Notion / Drive / Meeting）。
+-- 獨立一張表，不在 projects 上加欄位 —— 一個專案的資源是 0..N 筆，塞進
+-- projects 就要用陣列或 JSONB，兩者都讓「一筆資源」失去自己的 id 與約束。
+--
+-- 刻意沒有的欄位：
+--   · sort_order —— 排序固定 created_at, id；沒有 reorder 端點
+--   · updated_at —— 沒有人會問「這條連結上次改是什麼時候」
+--   · deleted_at —— 硬刪除，刪掉就是不見
+--   · icon       —— 由 type 推導，存起來就會有兩份真相
+--
+-- type 用受限 text 加 check，不用 PostgreSQL enum：日後要加一種只改 check，
+-- 不必動型別。url 的 regex 只放行 http / https —— 存進去的東西會在別人的
+-- 瀏覽器裡被打開，javascript: 與 data: 在資料庫這一層就擋掉。
+create table project_resources (
+  id          uuid primary key default gen_random_uuid(),
+  project_id  uuid not null references projects(id) on delete cascade,
+  label       text not null check (char_length(label) between 1 and 100
+                                   and btrim(label) <> ''),
+  type        text not null check (type in ('github', 'figma', 'notion', 'drive', 'meeting')),
+  url         text not null check (char_length(url) between 1 and 2048
+                                   and url ~* '^https?://[^[:space:]]+$'),
+  created_at  timestamptz not null default now()
+);
+
+-- 列表固定以 (created_at, id) 排序，且一律限定在單一 project 內。
+create index on project_resources (project_id, created_at, id);

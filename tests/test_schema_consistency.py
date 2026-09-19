@@ -22,7 +22,8 @@ from app import models
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA = ROOT / "sql" / "001_schema.sql"
 
-SPEC_TABLES = {"profiles", "projects", "seats", "messages"}
+# BE-G12（2026-09-16，得到授權）追加 project_resources。只追加，既有四張沒動。
+SPEC_TABLES = {"profiles", "projects", "seats", "messages", "project_resources"}
 
 # 這些關鍵字開頭的行是約束，不是欄位
 _NOT_A_COLUMN = re.compile(
@@ -65,10 +66,12 @@ SCHEMA_TABLES = parse_schema()
 # --------------------------------------------------------------------- schema
 
 
-def test_schema_defines_exactly_the_four_tables():
-    """守則 §1 規則 3：禁止建立規格書 §4 之外的資料表。"""
-    assert set(SCHEMA_TABLES) == SPEC_TABLES
+def test_schema_defines_exactly_the_declared_tables():
+    """守則 §1 規則 3：禁止建立規格書 §4 與後續裁決之外的資料表。
 
+    2026-09-16 的 BE-G12 加了第五張表 project_resources。
+    """
+    assert set(SCHEMA_TABLES) == SPEC_TABLES
 
 @pytest.mark.parametrize("table", sorted(SPEC_TABLES))
 def test_every_table_has_columns(table):
@@ -90,6 +93,8 @@ def test_schema_is_not_defined_by_an_orm():
 EXACT = [
     (models.ProfileOut, "profiles"),
     (models.MessageOut, "messages"),
+    # BE-G12：ProjectResourceOut 也是 `returning` 全部欄位建構的，沒有祕密欄位。
+    (models.ProjectResourceOut, "project_resources"),
 ]
 
 # 刻意不外送的欄位。L3（9/8）之後 profiles 存了帳號與密碼雜湊，而 ProfileOut
@@ -105,6 +110,9 @@ SUBSET = [
     (models.ProfileUpdate, "profiles"),
     (models.SeatClaim, "seats"),
     (models.ProjectCreate, "projects"),
+    # BE-G12：request model 只放得動的欄位，id／project_id／created_at 不在裡面。
+    (models.ProjectResourceCreate, "project_resources"),
+    (models.ProjectResourceUpdate, "project_resources"),
 ]
 
 
