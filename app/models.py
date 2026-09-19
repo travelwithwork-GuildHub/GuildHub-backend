@@ -149,9 +149,23 @@ class ProjectOut(BaseModel):
 
 
 class FormTeamIn(BaseModel):
-    """成軍。§6.1：系統指派房間模板、發起人設定密碼，同一個動作完成。"""
+    """成軍。§6.1：系統指派房間模板、發起人設定密碼，同一個動作完成。
 
-    password: str
+    [BE-G33]（2026-09-19，前端清單 1.6）：房間密碼 4–64 字。
+
+    這裡加 Field 不牴觸「不得在應用層重複實作長度檢查」—— 明文密碼不會進
+    資料庫（只有 scrypt 的輸出會），SQL 無從驗起，所以這是規則唯一的落腳處，
+    不是兩邊各寫一份。RegisterIn.password 的 min_length=8 早就是同一個道理。
+
+    4 與帳號密碼的 8 不同是刻意的，見 app/passwords.py 的 docstring：房間
+    密碼是發起人口頭傳給組員的**共享密碼**，帳號密碼保護的是**一個身分**。
+    共用雜湊函式沒問題，共用心智模型會出事。
+
+    max_length 不是安全需求（scrypt 沒有 bcrypt 那種 72 bytes 上限），是不讓
+    人拿一個 10MB 的字串去燒 CPU。數字與前端 src/forms/limits.ts 同源。
+    """
+
+    password: str = Field(min_length=4, max_length=64)
 
 
 class EnterIn(BaseModel):
