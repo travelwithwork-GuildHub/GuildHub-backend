@@ -76,6 +76,21 @@ async def claim_seat(
     即使如此仍然寫成單一句 INSERT ... SELECT 而不是「先 fetchval 再 insert」，
     有兩個理由：成功路徑少一次來回；以及不留下一段長得像正確寫法的先查再寫，
     讓日後讀這個檔案的人不會照著它去改別的地方。
+
+    ## [BE-G32] status = 'active' 為什麼也在同一個 where 裡
+
+    2026-09-19 之前，結案之後舊的 room token 仍然坐得到位：隊員 enter 拿到
+    token → 發起人 close → 隊員用那張還在 8 小時 TTL 內的 token 再打這個
+    端點，回 201，座位又長回來。/api/rooms 已經沒有這扇門，所以前端看不到，
+    但資料在（前端清單 1.3）。
+
+    前端提的作法是在 require_room_token 查一次 status。**沒有採用**：那個
+    依賴同時守著 GET /seats 與 POST /seats，照做會讓「close 後 GET …/seats
+    回 []」變成 403 —— 那是前端釘住的契約，而且讀一份空的座位表本來就無害。
+    洞只在寫入。
+
+    所以條件加在這句 where 裡，跟容量檢查同一個道理：查的是 projects 的狀態，
+    那個答案跟誰在跟你搶無關。零額外查詢，也沒有新的「先查再寫」。
     """
     try:
         # 容量檢查（seat_index < projects.seat_count）寫在 insert 的 where 裡，
@@ -84,7 +99,8 @@ async def claim_seat(
             "insert into seats (project_id, seat_index, user_id, desk_template) "
             "select $1::uuid, $2::smallint, $3::uuid, $4::smallint "
             "from projects "
-            "where id = $1::uuid and $2::smallint < seat_count "
+            "where id = $1::uuid and status = 'active' "
+            "and $2::smallint < seat_count "
             "returning seat_index, user_id, desk_template, claimed_at",
             project_id,
             payload.seat_index,
@@ -105,13 +121,17 @@ async def claim_seat(
         raise ApiError(404, "project_not_found", "專案不存在") from exc
 
     if row is None:
-        # where 沒有命中，兩種可能：專案不存在，或座位編號超出這個房間的座位數。
-        # 這一句只在請求已經失敗之後才跑，不在成功路徑上，也不參與任何競爭。
-        seat_count = await db.pool().fetchval(
-            "select seat_count from projects where id = $1", project_id
+        # where 沒有命中，三種可能：專案不存在、房間不是 active、或座位編號
+        # 超出這個房間的座位數。這一句只在請求已經失敗之後才跑，不在成功路徑
+        # 上，也不參與任何競爭。
+        state = await db.pool().fetchrow(
+            "select status, seat_count from projects where id = $1", project_id
         )
-        if seat_count is None:
+        if state is None:
             raise ApiError(404, "project_not_found", "專案不存在")
+        if state["status"] != "active":
+            raise ApiError(409, "project_closed", "這個專案已經結案，不能再認領座位")
+        seat_count = state["seat_count"]
         raise ApiError(
             400,
             "seat_beyond_seat_count",
