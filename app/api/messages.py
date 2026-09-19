@@ -80,3 +80,50 @@ async def list_messages(
         max(page, 0) * PAGE_SIZE,
     )
     return [MessageOut(**dict(r)) for r in rows]
+
+
+@router.post("/{message_id}/read", response_model=MessageOut)
+async def mark_read(
+    message_id: uuid.UUID,
+    me: uuid.UUID = Depends(get_current_user),
+) -> MessageOut:
+    """[BE-G35] 標記已讀（2026-09-19，前端清單 2.3）。
+
+    MessageOut.read_at 從第一天就在回應裡，但沒有任何端點寫得到它 —— 它永遠
+    是 null，所以收件匣做不了未讀。
+
+    ## 為什麼是 POST .../read 而不是 PATCH /api/messages/{id}
+
+    §4.2 站內信 immutable，test_contract.py 的 FORBIDDEN 釘著 PATCH 與 DELETE
+    不存在，那一條沒有被翻案。標記已讀不是編輯信件內容 —— 它改的是「我看過
+    了」這個事實，不是那句話本身。
+
+    ## 冪等：coalesce 而不是先查再寫
+
+    收件匣開兩個分頁、或重新整理，不該讓已讀時間一直往前跳。用
+    `read_at = coalesce(read_at, now())` 讓資料庫決定：已經有值就保留。
+    先查再寫在這裡雖然不會造成資料損壞，但會多一次來回，而且是同一個壞習慣
+    （守則 §1 規則 4）。
+
+    ## 主體條件寫在 WHERE 裡
+
+    跟 [P28] 同一個道理（§4.3：站內信是全案唯一有實質洩漏風險的資源）——
+    recipient_id = me 是 update 的條件，不是取回來之後才比。寄件人不能替
+    收件人標記已讀：那是在偽造對方讀過的證據。
+    """
+    row = await db.pool().fetchrow(
+        "update messages set read_at = coalesce(read_at, now()) "
+        "where id = $1 and recipient_id = $2 returning *",
+        message_id,
+        me,
+    )
+    if row is None:
+        # 沒命中，兩種可能。這一句只在請求已經失敗之後才跑，不在成功路徑上。
+        exists = await db.pool().fetchval(
+            "select true from messages where id = $1", message_id
+        )
+        if not exists:
+            raise ApiError(404, "message_not_found", "訊息不存在")
+        raise ApiError(403, "not_recipient", "只有收件人可以標記已讀")
+
+    return MessageOut(**dict(row))
