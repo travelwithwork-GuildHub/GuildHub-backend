@@ -43,6 +43,51 @@ create table projects (
   -- 狀態為 active 時，房間必須已備妥
   constraint room_ready check (
     status <> 'active' or (room_template is not null and password_hash is not null)
+  ),
+
+  -- ---- [BE-G28] 欄位的不變式（2026-09-19，前端 demo 需求清單 1.1） ----
+  --
+  -- 在此之前 title／body／seat_count 完全沒有約束，POST /api/projects 對空
+  -- 標題、0 個座位、9 個座位、300 字標題一律回 201。前端表單擋得住，直接打
+  -- API 就繞過了 —— demo 現場有人開 Swagger 試，髒資料就會進看板。
+  --
+  -- 修法刻意不是在 models.py 加 Field：長度與範圍的唯一真實來源是這個檔案
+  -- （守則 §1 規則 1 與 [P15]）。違反時由 app/main.py 的集中 handler 轉成
+  -- 400 + code，code 就是下面這些 constraint 的名稱 —— **改名等於改對外
+  -- 契約**，前端照這些字串分支。
+  --
+  -- 數字與前端 src/forms/limits.ts 同源（2026-09-19 對過）。
+
+  -- btrim：空白不只是「短」，只有空白的標題在看板上是一張空卡片。
+  --
+  -- 第二個參數不能省：btrim(text) 預設**只去半形空格**，tab 與換行不算 ——
+  -- 少了它，標題 E'\n\t' 會以 2 個字通過檢查（2026-09-19 被判準抓到）。
+  constraint projects_title_length check (
+    char_length(btrim(title, E' \t\r\n')) between 1 and 60
+  ),
+  constraint projects_body_length check (
+    char_length(btrim(body, E' \t\r\n')) between 1 and 2000
+  ),
+
+  -- 上限 8 是 seats.seat_in_range（0 ≤ seat_index < 8）的另一面，兩個數字
+  -- 必須同源：seat_count = 9 的房間第 9 格永遠坐不到（claim_seat 回 400），
+  -- seat_count = 0 的房間成軍之後沒有人坐得下。改其中一個就要改另一個。
+  constraint projects_seat_count_range check (seat_count between 1 and 8),
+
+  -- 前端要的是「最多 10 項、每項 1–40 字」，但 CHECK 不能含子查詢，unnest
+  -- 進不去 —— 逐項檢查只能靠在 schema 裡加一個 immutable 函式，那是這個
+  -- repo 沒有的機制。所以這裡擋的是**數量**與**總長**：塞 1000 個 tag 或塞
+  -- 一整篇文章都過不了，但單獨一個 300 字的 skill 會過。每項 1–40 由前端
+  -- 表單負責，這件事明寫在給前端的回覆文件裡，不是默默放過。
+  --
+  -- array_to_string 是 STABLE 不是 IMMUTABLE，PostgreSQL 在 CHECK 裡仍然接受
+  -- （2026-09-19 對 PostgreSQL 16 實測）。對 text[] 加固定分隔符的結果是
+  -- 決定性的，所以不會有「同一列這次過、下次不過」的問題。
+  constraint projects_needed_skills_count check (
+    coalesce(array_length(needed_skills, 1), 0) <= 10
+  ),
+  constraint projects_needed_skills_total_length check (
+    char_length(array_to_string(needed_skills, ',')) <= 450
   )
 );
 
