@@ -142,11 +142,18 @@ git fetch && git status -sb      # 必須只有一行 "## main...origin/main"
 ```
 
 ```bash
-railway link --project <專案 ID> --environment production --service backend
+railway link --project 18cf511a-cfa5-4874-bfd5-2b009e8ad09e --environment production --service backend
 railway up --service backend --detach
 ```
 
-- `railway link` 的連結資訊存在 CLI 的全域設定，**不會在 repo 裡產生檔案**
+- 專案 ID 是 `18cf511a-cfa5-4874-bfd5-2b009e8ad09e`（2026-09-20 補上，在此之前
+  這裡是佔位符，每次都要 `railway link` 互動式選）。它不是密鑰 —— 沒有帳號權限
+  的人拿到它什麼也做不了。gateway、backend、Postgres **三個服務同在這一個專案**，
+  因為 gateway 用 `${{backend.RAILWAY_PRIVATE_DOMAIN}}` 引用 backend，跨專案引用不了
+- `railway link` 的連結資訊存在 CLI 的全域設定（**以資料夾為單位**），不會在 repo
+  裡產生檔案。所以**一定要先 `cd` 進對的資料夾再 link** —— `railway up` 上傳的是
+  當前資料夾，在上一層 link 過的話，會把整個 `Guild Hall` 資料夾打包上傳
+  （2026-09-20 踩過）
 - 上傳時依 `.gitignore` 排除 `.env` 與 `.venv`（實測：容器裡沒有 `.env`，密鑰只在 Railway 的變數裡）
 - 建置用的是 Python 3.11（`RAILPACK_PYTHON_VERSION`），相依套件是 `cp311` wheel
 
@@ -215,7 +222,7 @@ railway ssh --service backend -- python tools/apply_sql.py --seed
 
 ```bash
 cd ../guildhub-gateway
-railway link --project <專案 ID> --environment production --service gateway
+railway link --project 18cf511a-cfa5-4874-bfd5-2b009e8ad09e --environment production --service gateway
 railway up --service gateway --detach
 railway domain --service gateway --port 8080
 ```
