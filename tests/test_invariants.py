@@ -164,3 +164,150 @@ async def test_invariant_seat_index_must_be_in_range(db):
             project,
             member,
         )
+
+
+# ------------------------------------------------- [BE-G28] 專案欄位的不變式
+#
+# 前端 2026-09-19 的清單第 1.1 條：POST /api/projects 對空標題、0 個座位、
+# 9 個座位、300 字標題全部回 201。前端表單擋得住，但直接打 API 就繞過了。
+#
+# 修法刻意**不是**在 models.py 加 Field —— 長度與範圍的唯一真實來源是這個
+# schema（CLAUDE.md、models.py 開頭的長註解、test_error_codes.py 的「長度是
+# 資料庫的事」）。所以下面這幾條跟上面四條是同一件事：繞過應用層直接寫，
+# 資料庫仍然要擋。
+#
+# 每一條都斷言 constraint 名稱，因為那個名稱就是回給前端的錯誤 `code`
+# （見 tests/test_error_payload.py）—— 改名等於改對外契約。
+
+
+async def test_invariant_project_title_cannot_be_blank(db):
+    """機制：projects_title_length。空白不只是「短」，btrim 之後是 0 字。"""
+    owner = await make_profile(db)
+
+    for blank in ("", "   ", "\n\t"):
+        with pytest.raises(asyncpg.CheckViolationError) as exc:
+            await db.execute(
+                "insert into projects (owner_id, title, body) values ($1, $2, $3)",
+                owner,
+                blank,
+                "內文",
+            )
+        assert exc.value.constraint_name == "projects_title_length"
+
+
+async def test_invariant_project_title_has_an_upper_bound(db):
+    """機制：projects_title_length。60 字進得去，61 字進不去。"""
+    owner = await make_profile(db)
+
+    ok = await db.fetchval(
+        "insert into projects (owner_id, title, body) values ($1, $2, $3) returning id",
+        owner,
+        "標" * 60,
+        "內文",
+    )
+    assert ok is not None, "60 字是上限本身，必須過"
+
+    with pytest.raises(asyncpg.CheckViolationError) as exc:
+        await db.execute(
+            "insert into projects (owner_id, title, body) values ($1, $2, $3)",
+            owner,
+            "標" * 61,
+            "內文",
+        )
+    assert exc.value.constraint_name == "projects_title_length"
+
+
+async def test_invariant_project_body_matches_message_body(db):
+    """機制：projects_body_length。上限跟 messages.body 同樣是 2000。"""
+    owner = await make_profile(db)
+
+    with pytest.raises(asyncpg.CheckViolationError) as exc:
+        await db.execute(
+            "insert into projects (owner_id, title, body) values ($1, $2, $3)",
+            owner,
+            "標題",
+            "字" * 2001,
+        )
+    assert exc.value.constraint_name == "projects_body_length"
+
+    with pytest.raises(asyncpg.CheckViolationError) as exc:
+        await db.execute(
+            "insert into projects (owner_id, title, body) values ($1, $2, $3)",
+            owner,
+            "標題",
+            "   ",
+        )
+    assert exc.value.constraint_name == "projects_body_length"
+
+
+@pytest.mark.parametrize("seat_count", [0, 9, -1])
+async def test_invariant_seat_count_must_fit_the_seat_table(db, seat_count):
+    """機制：projects_seat_count_range（1–8）。
+
+    上限 8 不是隨便選的，它是 seats.seat_in_range（0 ≤ seat_index < 8）的
+    另一面：seat_count = 9 的房間，第 9 格永遠坐不到，claim_seat 會回 400。
+    0 個座位則是「成軍之後沒有人坐得下」。兩個數字必須同源。
+    """
+    owner = await make_profile(db)
+
+    with pytest.raises(asyncpg.CheckViolationError) as exc:
+        await db.execute(
+            "insert into projects (owner_id, title, body, seat_count) "
+            "values ($1, $2, $3, $4)",
+            owner,
+            "標題",
+            "內文",
+            seat_count,
+        )
+    assert exc.value.constraint_name == "projects_seat_count_range"
+
+
+async def test_invariant_needed_skills_has_a_count_limit(db):
+    """機制：projects_needed_skills_count（最多 10 項）。"""
+    owner = await make_profile(db)
+
+    ok = await db.fetchval(
+        "insert into projects (owner_id, title, body, needed_skills) "
+        "values ($1, $2, $3, $4) returning id",
+        owner,
+        "標題",
+        "內文",
+        [f"技能{i}" for i in range(10)],
+    )
+    assert ok is not None, "10 項是上限本身，必須過"
+
+    with pytest.raises(asyncpg.CheckViolationError) as exc:
+        await db.execute(
+            "insert into projects (owner_id, title, body, needed_skills) "
+            "values ($1, $2, $3, $4)",
+            owner,
+            "標題",
+            "內文",
+            [f"技能{i}" for i in range(11)],
+        )
+    assert exc.value.constraint_name == "projects_needed_skills_count"
+
+
+async def test_invariant_needed_skills_has_a_total_length_limit(db):
+    """機制：projects_needed_skills_total_length（總長 ≤ 450）。
+
+    **這一條是妥協，寫在這裡免得日後有人以為是漏掉的。** 前端要的是「每項
+    1–40 字」，但 PostgreSQL 的 CHECK 不能含子查詢，unnest 進不去，逐項檢查
+    只能靠在 schema 裡引入一個 immutable 函式 —— 那是這個 repo 沒有的機制。
+
+    所以擋的是總長：塞 1000 個 tag（數量擋）或塞一整篇文章（總長擋）都過不了，
+    但單獨一個 300 字的 skill 會過。每項 1–40 由前端表單負責，這件事寫在
+    給前端的回覆文件裡，不是默默放過。
+    """
+    owner = await make_profile(db)
+
+    with pytest.raises(asyncpg.CheckViolationError) as exc:
+        await db.execute(
+            "insert into projects (owner_id, title, body, needed_skills) "
+            "values ($1, $2, $3, $4)",
+            owner,
+            "標題",
+            "內文",
+            ["字" * 200, "字" * 300],
+        )
+    assert exc.value.constraint_name == "projects_needed_skills_total_length"

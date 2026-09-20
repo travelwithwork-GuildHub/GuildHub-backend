@@ -19,6 +19,8 @@ from app.main import app
 
 PROJECT = uuid.uuid4()
 PROFILE = uuid.uuid4()
+RESOURCE = uuid.uuid4()
+MESSAGE = uuid.uuid4()
 
 # 附錄 B 的全部端點，扣掉公開的 /api/login。附帶合法 body，讓唯一的失敗理由
 # 是「沒登入」而不是「body 不合法」。
@@ -38,6 +40,21 @@ PROTECTED = [
     ("POST", "/api/messages", {"recipient_id": str(PROFILE), "body": "嗨"}),
     ("GET", "/api/messages", None),
     ("GET", "/api/rooms", None),
+    # BE-G12 Project Resources（2026-09-16）。只追加，既有各列沒動。
+    ("GET", f"/api/projects/{PROJECT}/resources", None),
+    (
+        "POST",
+        f"/api/projects/{PROJECT}/resources",
+        {"label": "Repository", "type": "github", "url": "https://example.com/r"},
+    ),
+    (
+        "PATCH",
+        f"/api/projects/{PROJECT}/resources/{RESOURCE}",
+        {"url": "https://example.com/new"},
+    ),
+    ("DELETE", f"/api/projects/{PROJECT}/resources/{RESOURCE}", None),
+    # [BE-G35] 標記已讀（2026-09-19）。只追加，既有各列沒動。
+    ("POST", f"/api/messages/{MESSAGE}/read", None),
 ]
 
 

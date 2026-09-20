@@ -64,8 +64,21 @@ ORM 當**查詢工具**可以用；當 **schema 定義來源**不行。
 - 任何 `/api/admin/*`
 
 端點清單凍結在 `tests/test_contract.py` 的 `EXPECTED`，多一個少一個都會紅。
-2026-09-08 的 L3 裁決加了 `POST /api/register`（第 17 個），這是唯一一次例外，
-而且是**先有裁決再改表**，不是反過來。
+2026-09-08 的 L3 裁決加了 `POST /api/register`（第 17 個），先有裁決再改表，
+不是反過來。
+
+2026-09-16 的 BE-G12 得到授權，加了 project_resources 表與 4 個端點（第 18～21 個）；範圍與理由見該 PR。
+
+BE-G12 同樣是先有裁決再改表，而且是**加法式**的：
+既有 17 個端點的 method、path、request、response、權限、錯誤碼一個字都沒動，
+`ProjectOut` 也沒有新欄位。這種例外每一次都要留下可引用的紀錄 ——
+沒有紀錄的話，下一個人會把它當成違規改回去。
+
+2026-09-19 的 BE-G35 加了 `POST /api/messages/{message_id}/read`（第 22 個）。
+`MessageOut.read_at` 從第一天就在回應裡，但沒有任何端點寫得到它。
+**注意這不是 `PATCH /api/messages/{id}`** —— 那個仍然在 `FORBIDDEN` 裡，
+站內信 immutable 沒有被翻案；標記已讀改的是「我看過了」這個事實，不是那句話。
+同樣是先有裁決再改表，同樣是加法式的。
 
 ---
 
@@ -117,7 +130,12 @@ WHERE (sender_id = :me OR recipient_id = :me)
 ## 另外兩件事
 
 - **不要在 `models.py` 重複實作長度檢查。** 長度規則的唯一來源是
-  `sql/001_schema.sql`，所以超長欄位不會回 422，會是資料庫錯誤
+  `sql/001_schema.sql`，所以超長欄位**不會回 422**（422 代表規則被搬進了
+  Pydantic）。2026-09-19 [BE-G30] 起它是 **400 + `code`**，`code` 就是
+  constraint 的名稱——轉碼在 `app/main.py` 的集中 handler，規則的位置沒有變。
+  在那之前它是 500，因為沒有人接住 `asyncpg.CheckViolationError`
+- **`ApiError`（`app/errors.py`）的 `code` 是對外契約。** 前端拿它分支，
+  改名要通知前端，等同改 `tests/test_contract.py` 的 `EXPECTED`
 - **`uvicorn` 不能加 `--workers`。** 即時層的狀態全在 module-level 物件裡，多一個
   worker 就是多一份互相看不見的世界，而且不會有任何錯誤訊息
 

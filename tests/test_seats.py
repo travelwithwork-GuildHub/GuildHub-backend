@@ -311,3 +311,83 @@ async def test_seat_race_at_the_database_level(db):
 
     results = await asyncio.gather(*(claim(u) for u in people))
     assert results.count("ok") == 1, f"約束沒擋住：{results}"
+
+
+# ------------------------------------ [BE-G32] 結案之後，舊的 room token 失效
+#
+# 前端 2026-09-19 的清單第 1.3 條：隊員 enter 拿到 token → 發起人 close →
+# 隊員用舊 token 再 POST seats 仍然 201，座位又長回來。/api/rooms 已經沒有
+# 這扇門，所以前端看不到，但資料在。
+#
+# 前端提的作法是在 require_room_token 查 status。**不採用**：那個依賴同時守著
+# GET /seats 與 POST /seats，會讓「close 後 GET …/seats 回 []」變成 403，而那
+# 是前端釘住的契約（下面最後一條測試就是在釘它）。
+#
+# 洞只在寫入，所以條件加在 claim_seat 那句 INSERT ... SELECT 的 where 裡 ——
+# 零額外查詢，也不會多出一段長得像「先查再寫」的程式。
+
+
+async def test_a_seat_cannot_be_claimed_after_the_project_is_closed(db, login):
+    """第 1.3 條本身：token 還在有效期內，但房間已經關了。"""
+    project_id, owner = await open_room(login)
+    member = await login("隊員")
+    await enter(member, project_id)
+
+    claimed = await member.post(
+        f"/api/projects/{project_id}/seats", json={"seat_index": 3}
+    )
+    assert claimed.status_code == 201, claimed.text
+
+    closed = await owner.post(f"/api/projects/{project_id}/close", json={})
+    assert closed.status_code == 200, closed.text
+
+    # 同一個 client，session 裡的 room token 一字未變，仍在 8 小時 TTL 內
+    response = await member.post(
+        f"/api/projects/{project_id}/seats", json={"seat_index": 3}
+    )
+
+    assert response.status_code == 409, f"回了 {response.status_code}：{response.text}"
+    assert response.json()["code"] == "project_closed"
+
+    left = await db.fetchval(
+        "select count(*) from seats where project_id = $1", uuid.UUID(project_id)
+    )
+    assert left == 0, "座位不得因為一次失敗的認領又長回來"
+
+
+async def test_listing_seats_after_close_still_returns_an_empty_list(db, login):
+    """前端第 3 節釘住的契約：close 後 GET …/seats 回 []，不是 403。
+
+    這一條不是新功能，是**防止 BE-G32 修過頭**：如果有人把狀態檢查加在
+    require_room_token 上，讀取也會被擋，這裡就會紅。
+    """
+    project_id, owner = await open_room(login)
+    member = await login("隊員")
+    await enter(member, project_id)
+    await member.post(f"/api/projects/{project_id}/seats", json={"seat_index": 0})
+
+    await owner.post(f"/api/projects/{project_id}/close", json={})
+
+    response = await member.get(f"/api/projects/{project_id}/seats")
+    assert response.status_code == 200, f"回了 {response.status_code}：{response.text}"
+    assert response.json() == []
+
+
+async def test_a_recruiting_project_has_no_seats_to_claim_either(db, login):
+    """還沒成軍也不是 active —— 不過這條路本來就被 room token 擋在前面。
+
+    列在這裡是為了講清楚新條件的語意是「status = 'active'」而不是
+    「status <> 'closed'」：沒有房間的專案不該有座位。
+    """
+    owner = await login("發起人")
+    created = await owner.post(
+        "/api/projects", json={"title": "還沒成軍", "body": "內文"}
+    )
+    project_id = created.json()["id"]
+
+    response = await owner.post(
+        f"/api/projects/{project_id}/seats", json={"seat_index": 0}
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "no_room_token"

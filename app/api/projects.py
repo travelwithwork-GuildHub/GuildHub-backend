@@ -6,11 +6,13 @@
 
 import random
 import uuid
+from typing import Literal
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request, Response
 
 from app import db, room_token
+from app.errors import ApiError
 from app.deps import get_current_user, require_owner
 from app.passwords import hash_password, verify_password
 from app.models import (
@@ -61,24 +63,84 @@ async def create_project(
 
 @router.get("", response_model=list[ProjectOut])
 async def list_projects(
-    status: ProjectStatus = ProjectStatus.recruiting,
+    response: Response,
+    status: ProjectStatus | Literal["all"] = ProjectStatus.recruiting,
+    owner_id: uuid.UUID | None = None,
     page: int = 0,
-    _me: uuid.UUID = Depends(get_current_user),
+    me: uuid.UUID = Depends(get_current_user),
 ) -> list[ProjectOut]:
     """[P20] 任務看板。過期的不出現。
 
     只在查詢時過濾，不實作到期排程與提醒（守則 §3：貼文到期提醒、續期、
     自動下架排程已砍除）。「自動下架」因此是查詢的結果，不是背景工作 ——
     少了一個排程器，也少了一種會在半夜壞掉的東西。
+
+    ## [BE-G34]「我的案件」（2026-09-19，前端清單 2.2）
+
+    前端 FE-J03 要列出「我發的所有案子」，含 active 與 closed。在這之前只能
+    用 status 篩，所以他們得對三種狀態各翻多頁、再在前端過濾 owner_id ——
+    每頁 20 筆又沒有總數，只能一直翻到空頁為止。
+
+    三件事一起加，但**回應形狀一個字都沒變**：
+
+      · owner_id：可與 status 組合
+      · status=all：新增的值。**預設值仍然是 recruiting** —— 前端第 3 節把
+        「不帶 status 只回 recruiting」釘成契約，改預設值會弄壞看板與房間門
+      · 總數走 X-Total-Count header
+
+    總數為什麼是 header 而不是把回應改成 {items, total, has_more}：這個端點
+    同時餵著任務看板與走廊的門，形狀一改前後端必須同一天上線，而發表前兩邊
+    各只剩一個部署窗口。header 是加法，前端的契約 schema 不用動。
+
+    has_more 不另外回：(page + 1) * PAGE_SIZE < total 就是它。多一個欄位就多
+    一種跟 total 互相矛盾的可能。
+
+    ## 為什麼自己查自己時不套 expires_at
+
+    「過期就下架」對看板是對的，對發起人自己的清單是把他的東西弄丟 —— 貼文
+    過期的那一刻，他的案子會從「我的案件」消失，但案子還在、房間還開著。
+    所以只有在查的不是自己的東西時才套這個過濾。
+
+    ## 排序為什麼補第二鍵
+
+    updated_at 來自 now() 的預設值，同一批建立的案子時間戳會相同。只用
+    updated_at 排序時 PostgreSQL 對相同鍵的順序不保證穩定，翻頁就會有筆重複
+    出現、有筆永遠看不到。資料量小時幾乎不會發作 —— 這種 bug 會在資料變多
+    的那天才出現，而那天通常是發表當天。
     """
+    conditions: list[str] = []
+    args: list = []
+
+    if status != "all":
+        args.append(status.value)
+        conditions.append(f"status = ${len(args)}")
+
+    if owner_id is not None:
+        args.append(owner_id)
+        conditions.append(f"owner_id = ${len(args)}")
+
+    # 查的不是自己的東西時才套下架過濾。owner_id 是 None（看板）也算。
+    if owner_id != me:
+        conditions.append("expires_at > now()")
+
+    where = " and ".join(conditions) if conditions else "true"
+
+    # 總數與清單共用同一組條件與參數 —— 分開寫兩份 where 的話，哪天改了一邊
+    # 就會出現「總數說有 37 筆，翻到底只有 20 筆」。
+    total = await db.pool().fetchval(
+        f"select count(*) from projects where {where}", *args
+    )
     rows = await db.pool().fetch(
-        f"select {_COLUMNS} from projects "
-        "where status = $1 and expires_at > now() "
-        "order by updated_at desc limit $2 offset $3",
-        status.value,
+        f"select {_COLUMNS} from projects where {where} "
+        f"order by updated_at desc, id desc limit ${len(args) + 1} offset ${len(args) + 2}",
+        *args,
         PAGE_SIZE,
         max(page, 0) * PAGE_SIZE,
     )
+
+    # 同源部署時瀏覽器讀得到；跨源時要靠 CORSMiddleware 的 expose_headers
+    # 放行（app/main.py），少了那個前端 dev 模式會讀到 undefined。
+    response.headers["X-Total-Count"] = str(total)
     return [ProjectOut(**dict(r)) for r in rows]
 
 
@@ -92,7 +154,7 @@ async def get_project(
         f"select {_COLUMNS} from projects where id = $1", project_id
     )
     if row is None:
-        raise HTTPException(status_code=404, detail="專案不存在")
+        raise ApiError(404, "project_not_found", "專案不存在")
     return ProjectOut(**dict(row))
 
 
@@ -109,19 +171,41 @@ async def form_team(
     分開寫的話，中間任何一步失敗都會留下 room_ready check 擋不住的中間狀態
     —— 不，其實 check 會擋住，這正是它存在的價值：即使這裡寫錯，資料庫也
     不會讓「成軍了但房間沒開」這件事發生。
+
+    ## [BE-G31] 為什麼 where 帶狀態，以及為什麼 active 仍然放行
+
+    2026-09-19 之前這句 update 沒有狀態條件，require_owner 也只驗 owner ——
+    所以對 closed 的案子打這個端點會回 200，status 變回 active，門又出現在
+    走廊上。**「結案」可以被無限次撤銷**（前端清單 1.2）。
+
+    狀態條件寫在 where 裡而不是先 select 再判斷：兩個請求同時進來時，先查
+    再寫的版本會兩個都看到 recruiting、兩個都成軍，第二個把第一個的密碼蓋掉
+    （守則 §1 規則 4）。帶條件的 update 由資料庫決定誰贏，輸的那個 returning
+    是空的。
+
+    `active` 刻意仍然放行 —— 它就是「換密碼」，前端 FE-J04 正在用。
+    CLAUDE.md 的「不要實作的功能」裡寫的是**獨立的 reset-password 端點**已
+    砍除，不是這個行為；2026-09-19 裁決把這件事寫清楚了，所以它現在是受
+    保護的行為：要拿掉必須先通知前端。
     """
     template = random.randrange(ROOM_TEMPLATE_COUNT)
     try:
         row = await db.pool().fetchrow(
             "update projects set status = 'active', room_template = $2, "
-            f"password_hash = $3, updated_at = now() where id = $1 returning {_COLUMNS}",
+            f"password_hash = $3, updated_at = now() "
+            f"where id = $1 and status in ('recruiting', 'active') returning {_COLUMNS}",
             project_id,
             template,
             hash_password(payload.password),
         )
     except asyncpg.CheckViolationError as exc:
         # room_ready 擋下的成軍請求 → 400（附錄 C）
-        raise HTTPException(status_code=400, detail="房間未備妥，無法成軍") from exc
+        raise ApiError(400, "room_ready", "房間未備妥，無法成軍") from exc
+
+    if row is None:
+        # require_owner 已經確認過專案存在且是我的，所以走到這裡只剩一種
+        # 可能：它已經結案了。不必再查一次資料庫。
+        raise ApiError(409, "project_closed", "這個專案已經結案，不能再成軍")
     return ProjectOut(**dict(row))
 
 
@@ -174,9 +258,9 @@ async def enter_room(
         "select password_hash from projects where id = $1", project_id
     )
     if stored is None:
-        raise HTTPException(status_code=404, detail="專案不存在或房間尚未開啟")
+        raise ApiError(404, "room_not_open", "專案不存在或房間尚未開啟")
     if not verify_password(payload.password, stored):
-        raise HTTPException(status_code=403, detail="房間密碼錯誤")
+        raise ApiError(403, "wrong_password", "房間密碼錯誤")
 
     token = room_token.issue(str(project_id), str(me))
     tokens = dict(request.session.get("room_tokens") or {})

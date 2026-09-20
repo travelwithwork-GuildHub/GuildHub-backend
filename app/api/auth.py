@@ -3,9 +3,10 @@
 import uuid
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 
 from app import db
+from app.errors import ApiError
 from app.deps import get_current_user
 from app.models import LoginIn, ProfileOut, RegisterIn
 from app.passwords import hash_password, verify_password
@@ -56,7 +57,7 @@ async def login(payload: LoginIn, request: Request) -> ProfileOut:
         # 帳號不存在與密碼錯誤回同一個碼、同一句話。分開回等於免費送出一支
         # 帳號存在性的查詢器，而那是「有沒有這個人」的洩漏，不是登入功能。
         if row is None or not verify_password(payload.password, row["password_hash"]):
-            raise HTTPException(status_code=403, detail="帳號或密碼錯誤")
+            raise ApiError(403, "bad_credentials", "帳號或密碼錯誤")
     elif payload.resume_token is not None:
         row = await db.pool().fetchrow(
             "select * from profiles where id = $1", payload.resume_token
@@ -64,7 +65,7 @@ async def login(payload: LoginIn, request: Request) -> ProfileOut:
         if row is None:
             # 名片被刪了，或資料庫重建過。不要靜默改成建一張新的 —— 那會讓
             # 「我回來了」與「我是新來的」在前端長得一模一樣。
-            raise HTTPException(status_code=404, detail="名片不存在")
+            raise ApiError(404, "profile_not_found", "名片不存在")
     else:
         row = await db.pool().fetchrow(
             "insert into profiles (id, display_name) values ($1, $2) returning *",
@@ -100,7 +101,7 @@ async def register(payload: RegisterIn, request: Request) -> ProfileOut:
             hash_password(payload.password),
         )
     except asyncpg.UniqueViolationError:
-        raise HTTPException(status_code=409, detail="這個帳號已經有人用了")
+        raise ApiError(409, "login_id_taken", "這個帳號已經有人用了")
 
     _remember(request, row)
     return ProfileOut(**dict(row))
@@ -111,5 +112,5 @@ async def me(user_id: uuid.UUID = Depends(get_current_user)) -> ProfileOut:
     row = await db.pool().fetchrow("select * from profiles where id = $1", user_id)
     if row is None:
         # session 指向已不存在的名片（例如資料庫重建過）
-        raise HTTPException(status_code=401, detail="未登入")
+        raise ApiError(401, "not_logged_in", "未登入")
     return ProfileOut(**dict(row))

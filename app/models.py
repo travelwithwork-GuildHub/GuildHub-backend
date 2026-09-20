@@ -149,9 +149,23 @@ class ProjectOut(BaseModel):
 
 
 class FormTeamIn(BaseModel):
-    """成軍。§6.1：系統指派房間模板、發起人設定密碼，同一個動作完成。"""
+    """成軍。§6.1：系統指派房間模板、發起人設定密碼，同一個動作完成。
 
-    password: str
+    [BE-G33]（2026-09-19，前端清單 1.6）：房間密碼 4–64 字。
+
+    這裡加 Field 不牴觸「不得在應用層重複實作長度檢查」—— 明文密碼不會進
+    資料庫（只有 scrypt 的輸出會），SQL 無從驗起，所以這是規則唯一的落腳處，
+    不是兩邊各寫一份。RegisterIn.password 的 min_length=8 早就是同一個道理。
+
+    4 與帳號密碼的 8 不同是刻意的，見 app/passwords.py 的 docstring：房間
+    密碼是發起人口頭傳給組員的**共享密碼**，帳號密碼保護的是**一個身分**。
+    共用雜湊函式沒問題，共用心智模型會出事。
+
+    max_length 不是安全需求（scrypt 沒有 bcrypt 那種 72 bytes 上限），是不讓
+    人拿一個 10MB 的字串去燒 CPU。數字與前端 src/forms/limits.ts 同源。
+    """
+
+    password: str = Field(min_length=4, max_length=64)
 
 
 class EnterIn(BaseModel):
@@ -212,3 +226,56 @@ class RoomDoorOut(BaseModel):
     project_id: uuid.UUID
     title: str
     online_count: int
+
+
+# ---------------------------------------------------------------- 專案資源
+
+# BE-G12（2026-09-16，得到授權）。Project Room 的外部連結看板。
+
+
+class ResourceType(str, enum.Enum):
+    """對應 `project_resources.type` 的 check。
+
+    鏡像資料庫的合法值，理由跟 ProjectStatus 一樣：這是有限集合，不是長度
+    規則 —— 把它留給資料庫會讓「打錯一個字」變成 500 而不是 422。
+    V1 沒有 other：未分類的連結會讓前端的 icon 推導失去意義。
+    """
+
+    github = "github"
+    figma = "figma"
+    notion = "notion"
+    drive = "drive"
+    meeting = "meeting"
+
+
+class ProjectResourceCreate(BaseModel):
+    """POST。長度與 URL scheme 刻意不在這裡驗（[P15]），由資料庫的 check 擋。"""
+
+    label: str
+    type: ResourceType
+    url: str
+
+
+class ProjectResourceUpdate(BaseModel):
+    """PATCH。未給的欄位不動，給了 null 是 422。
+
+    型別寫 `str` 而不是 `str | None`，是因為這三欄在資料庫都是 NOT NULL ——
+    「把它清空」沒有對應的合法狀態。預設值 None 只代表「這次沒給」，
+    由 `model_fields_set` 分辨，不會被當成要寫進去的值。
+
+    id / project_id / created_at 不在這裡：它們不是可以改的東西，
+    而未知欄位會被 Pydantic 靜默忽略（全 repo 都沒有設 extra）。
+    """
+
+    label: str = None  # type: ignore[assignment]
+    type: ResourceType = None  # type: ignore[assignment]
+    url: str = None  # type: ignore[assignment]
+
+
+class ProjectResourceOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    label: str
+    type: ResourceType
+    url: str
+    created_at: dt.datetime

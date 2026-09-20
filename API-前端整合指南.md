@@ -138,8 +138,8 @@ POST /api/register
 
 - `login_id` 是帳號，`nickname` 是世界裡顯示的名字，**兩者分開**：
   `display_name` 改得動，拿它當帳號的話改名就等於換帳號
-- `login_id` 長度 3–32 由資料庫的 check 擋，所以**超出範圍是 500 不是 422**
-  （與 `display_name` 同一個慣例，見 §8）
+- `login_id` 長度 3–32 由資料庫的 check 擋，所以**超出範圍不是 422**：
+  2026-09-19 起是 `400 {"code":"profiles_login_id_check"}`（在那之前是 500）
 - **沒有密碼重設、沒有忘記密碼信、沒有 email 驗證。** 沒有寄信管道，
   做出來會是一條走不完的路。忘記密碼請走 `resume_token` 或重新註冊
 - 失敗用 **403 不是 401**：401 在 §4 的約定是「導向登入畫面」，
@@ -201,14 +201,53 @@ localStorage.setItem('guildhub.resume', profile.id)
 
 ## 4. 錯誤格式與錯誤碼
 
-FastAPI 標準格式：
+FastAPI 標準格式，**加上一個機器可讀的 `code`**（2026-09-19 BE-G29）：
 
 ```json
-{"detail": "這個座位已經有人了"}
+{"detail": "這個座位已經有人了", "code": "seat_taken"}
 ```
 
 `detail` 是**中文、可直接顯示給使用者**的訊息（後端刻意這樣寫）。422 時 `detail`
-會是 Pydantic 的錯誤陣列，不適合直接顯示。
+會是 Pydantic 的錯誤陣列，不適合直接顯示，**而且 422 沒有 `code`**。
+
+### `code` 是加法，不是換法
+
+`detail` 的文案一字未改，所以原本比對 `detail` 的程式繼續能跑。但**請改用
+`code` 分支** —— 文案哪天為了通順改一個字，比對字串的程式就會安靜地壞掉。
+
+`code` 等同端點名稱，是對外契約：**後端要改會先通知前端。**
+
+| `code` | HTTP | 什麼時候 |
+|---|---|---|
+| `not_logged_in` | 401 | 沒有 session |
+| `not_owner` | 403 | 非發起人操作 owner-only 端點 |
+| `wrong_password` | 403 | `enter` 房間密碼錯 |
+| `no_room_token` | 403 | 尚未通過房間密碼驗證 |
+| `token_not_for_this_room` / `token_not_yours` | 403 | token 綁錯房間／人 |
+| `bad_credentials` | 403 | 帳號密碼登入失敗（不透露是哪一個錯） |
+| `not_recipient` | 403 | 標記別人的信為已讀 |
+| `project_not_found` / `profile_not_found` / `recipient_not_found` / `message_not_found` / `resource_not_found` | 404 | 找不到 |
+| `room_not_open` | 404 | `enter` 一個還沒成軍的專案 |
+| `already_seated` | 409 | 你在這個房間已經有座位 |
+| `seat_taken` | 409 | 這一格已經有人 |
+| `project_closed` | 409 | 對已結案的專案成軍、認領座位或改資源 |
+| `project_not_formed` | 409 | 對還沒成軍的專案改資源 |
+| `resource_limit_reached` | 409 | 專案資源筆數到上限 |
+| `login_id_taken` | 409 | 註冊撞帳號 |
+| `seat_beyond_seat_count` | 400 | `seat_index >= seat_count`，`detail` 含座位數 |
+| `seat_out_of_range` | 400 | `seat_index` 是負數（見下） |
+| `room_ready` | 400 | `room_ready` check 擋下的成軍 |
+| `no_self_send` | 400 | 寄信給自己 |
+| constraint 名稱 | 400 | 資料庫欄位約束（見下） |
+
+**資料庫約束一律是 400，`code` 就是 constraint 的名稱** ——
+`projects_title_length`、`projects_seat_count_range`、
+`profiles_display_name_check`、`messages_body_check`、
+`project_resources_label_check`⋯⋯ 這類錯誤在 2026-09-19 之前會是 **500**
+（沒有人接住資料庫的例外）。現在不會再有 500 了。
+
+> `seat_out_of_range` 幾乎是死路：`seat_count` 上限就是 8，所以
+> `seat_index >= 8` 一定先撞上 `seat_beyond_seat_count`。只有負數走得到。
 
 | 碼 | 意義 | 前端該做什麼 |
 |---|---|---|
@@ -216,30 +255,37 @@ FastAPI 標準格式：
 | 401 | 未登入 | 導向登入 |
 | 403 | 非發起人／房間密碼錯誤／尚未通過房間驗證 | 顯示 `detail`，密碼錯則留在密碼框 |
 | 404 | 專案／名片／收件人不存在 | 顯示「已不存在」，重新拉列表 |
-| **409** | **座位衝突**（別人先坐了，或你已經有位子了） | **重新拉一次 `GET /seats` 並更新畫面** |
+| **409** | **座位衝突**（別人先坐了，或你已經有位子了）；**專案資源**不能寫（專案還在招募或已結案、已滿 50 筆） | 座位：**重新拉一次 `GET /seats` 並更新畫面**。資源：顯示 `detail`，不必重拉座位（見 §5.7） |
 | 422 | 請求格式錯誤（型別不符、缺必填） | 這是前端的 bug，不該讓使用者看到 |
-| 500 | 見 §8「已知的意外行為」 | — |
+| 500 | **不該再出現。** 看到就是 bug，請回報給後端 | — |
 
 ### 409 是正常流程，不是例外
 
 座位認領由資料庫的唯一鍵衝突擋下，不是「先查再寫」。所以**兩個人同時點同一格，
-其中一個一定會收到 409** —— 這是設計，不是 bug。兩種 409 用 `detail` 區分：
+其中一個一定會收到 409** —— 這是設計，不是 bug。兩種 409 用 `code` 區分：
 
-- `"這個座位已經有人了"` → 別人先坐了，刷新座位圖
-- `"你已經在這個房間有座位了"` → 一人只能一格（沒有換位／退位端點）
+- `seat_taken` → 別人先坐了，刷新座位圖
+- `already_seated` → 一人只能一格（沒有換位／退位端點），帶使用者回他原本的位子
+
+（2026-09-19 之前只能比對 `detail` 的中文字串。那兩句話仍然一字未改，但請改
+讀 `code`。）
 
 ---
 
-## 5. REST 端點（17 個，已凍結）
+## 5. REST 端點（22 個，已凍結）
 
 端點集合由 `tests/test_contract.py` 鎖住，多一個少一個都會讓測試紅掉。
 **凍結後要改欄位，後端會先通知前端。**
 
 > 2026-09-08：L3 裁決加了 `POST /api/register`，端點從 16 個變 17 個。
-> 這是凍結後唯一一次加端點，且先有裁決才改表。
+> 2026-09-16：BE-G12 加了 Project Resources 的 4 個（§5.7），17 → 21。
+> 2026-09-19：BE-G35 加了 `POST /api/messages/{message_id}/read`（§5.5），
+> 21 → 22。
+> 三次都是先有裁決才改表，而且既有端點的行為沒有跟著變。
 
 分頁一律 `?page=`，**每頁 20 筆，從 0 開始**。翻過尾頁回 `[]`（不是 404）。
-回應沒有 total count，前端請以「回傳筆數 < 20」判斷已到底。
+`GET /api/projects` 自 2026-09-19 起回應帶 `X-Total-Count` header（§5.3）；
+其他清單端點仍然沒有總數，請以「回傳筆數 < 20」判斷已到底。
 
 ### 5.1 身分
 
@@ -362,6 +408,7 @@ session（座位端點要用）。**前端不需要自己把 token 放進任何 
 |---|---|---|
 | POST | `/api/messages` | body `{recipient_id, body}` → **201** `MessageOut` |
 | GET | `/api/messages?page=0` | → `MessageOut[]`，依 `created_at` 新到舊 |
+| POST | `/api/messages/{message_id}/read` | 無 body → **200** `MessageOut`（`read_at` 已填） |
 
 ```jsonc
 // MessageOut
@@ -372,11 +419,19 @@ session（座位端點要用）。**前端不需要自己把 token 放進任何 
 - **收件匣同時包含寄出與收到的信**（`sender_id = 我 OR recipient_id = 我`）。
   前端要自己比對 `sender_id === me.id` 來分收發
 - **站內信不可編輯、不可刪除**（immutable，規格 §4.2）。`PATCH` / `DELETE`
-  端點不存在且不會有
-- **`read_at` 永遠是 `null`**：沒有任何端點會標記已讀。若要做未讀紅點，
-  目前只能在前端本地記錄，或請後端加端點（等於改契約）
-- 寄給自己 → `400 {"detail":"不能寄信給自己"}`
-- 收件人不存在 → `404 {"detail":"收件人不存在"}`
+  端點不存在且不會有。標記已讀不算編輯 —— 它改的是「我看過了」這個事實，
+  不是那句話本身，所以是獨立的 `POST .../read` 而不是 `PATCH`
+- **`read_at` 由 `POST /api/messages/{id}/read` 寫入**（2026-09-19 BE-G35）。
+  在那之前它永遠是 `null`，因為沒有任何端點寫得到它
+  - **冪等**：重複標記回 200，`read_at` 維持第一次的時間，不覆寫
+  - 只有收件人能標：寄件人或路人 → `403 {"code":"not_recipient"}`
+  - 信不存在 → `404 {"code":"message_not_found"}`
+  - 未讀數請自己數（`read_at === null && recipient_id === me.id`），
+    後端沒有 `unread_count`
+- 寄給自己 → `400 {"detail":"不能寄信給自己","code":"no_self_send"}`
+- 收件人不存在 → `404 {"detail":"收件人不存在","code":"recipient_not_found"}`
+- body 超過 2000 字 → `400 {"code":"messages_body_check"}`（2026-09-19 之前
+  是 500）
 
 ### 5.6 走廊門位 ★
 
@@ -392,6 +447,62 @@ GET /api/rooms
 它不會透過 WebSocket 推播，前端若要更新走廊人數，需要自行輪詢（建議 5–10 秒一次）。
 
 門的排列是一維的：`x = index × 間距`，**照回傳順序擺即可**，沒有版面演算法。
+
+### 5.7 專案資源（Project Resources）★ 2026-09-16 新增
+
+Project Room 裡的外部連結看板。**獨立的表與端點，`ProjectOut` 沒有新欄位。**
+
+| Method | Path | 主體 | 說明 |
+|---|---|---|---|
+| GET | `/api/projects/{project_id}/resources` | 發起人，或**已進房**的人 | → `ProjectResourceOut[]`，依 `created_at, id` 由舊到新。**不分頁**（上限 50 筆）；沒有就 `[]` |
+| POST | `/api/projects/{project_id}/resources` | **發起人** | body `{label, type, url}` → **201** `ProjectResourceOut` |
+| PATCH | `/api/projects/{project_id}/resources/{resource_id}` | **發起人** | 三欄皆選填，未給的不動；送 `{}` 回 200 原樣 |
+| DELETE | `/api/projects/{project_id}/resources/{resource_id}` | **發起人** | → **204**，沒有 body |
+
+```jsonc
+// ProjectResourceOut
+{
+  "id": "uuid",
+  "project_id": "uuid",
+  "label": "Repository",
+  "type": "github",        // github | figma | notion | drive | meeting
+  "url": "https://github.com/org/repo",
+  "created_at": "2026-09-16T10:00:00Z"
+}
+```
+
+**房間票只給讀取權。** 拿到 `room_token` 代表通過房間密碼，**不代表可以新增或
+修改資源** —— 寫入一律只有發起人（沒有成員制，§6.2）。非發起人寫入是 403。
+
+**狀態決定寫不寫得動：**
+
+| 專案狀態 | 發起人讀 | 其他人讀 | 任何人寫 |
+|---|---|---|---|
+| `recruiting` | 200 `[]` | 403 | **409** |
+| `active` | 200 | 進房了 200，沒進房 403 | 發起人成功，其他人 403 |
+| `closed` | 200（資源不會消失） | **403**（就算手上還有票） | **409** |
+
+> 結案之後 `/enter` 仍然換得到票（`close` 不清 `password_hash`），所以
+> **不要用「拿得到票」判斷房間還開著**。資源端點自己查狀態。
+
+**錯誤碼：**
+
+| 情況 | 回應 |
+|---|---|
+| 未登入 | 401 |
+| 專案不存在；資源不存在或不屬於這個專案 | 404 |
+| 非發起人寫入 | 403 |
+| 狀態不允許寫入（`recruiting`／`closed`）、第 51 筆 | **409** |
+| 缺欄位、型別錯、`type` 不在五種之內、明確送 `null` | 422 |
+| `label`／`url` 超長、`url` 不是 `http(s)://`、`label` 只有空白 | **400 ＋ `code`**（資料庫 check，`code` 是 constraint 名稱。2026-09-19 之前是 500 text/plain） |
+| 未知欄位（含 `id`、`project_id`、`created_at`） | 靜默忽略，值不會被改到 |
+
+**前端要自己擋的：** `label` 1–100 字、`url` 1–2048 字（算 code point）、
+scheme 只放行 http／https、一個專案最多 50 筆。同一個 URL 可以重複，**刻意不去重**。
+
+**沒有的東西**：排序端點／`sort_order`、`updated_at`、軟刪除、`other` 類型、
+單筆 GET、PUT。洽談用的一次性 Meeting URL 不在這裡（那是另一個缺口），
+這裡的 `meeting` 是使用者自己貼的常設會議室連結。
 
 ---
 
@@ -432,6 +543,12 @@ token 不屬於這個房間或這個人。
   開發期請用瀏覽器的 WS 面板自己核對
 - **狀態文字上限 12 個字**（字數，不是位元組，中文算 1 字）。超過會被**丟棄**，
   舊狀態維持不變 —— 前端請自己在輸入框限制 `maxlength=12`，否則使用者會以為壞了
+- **對話上限 500 個字**（同樣是字數不是位元組），且**每條連線每秒最多 5 則**
+  （2026-09-19 BE-G36）。超過任何一個一律**丟棄**：不回錯、**不關連線**。
+  前端請在輸入框限制 `maxlength=500` 並保留現有的送出節流 —— 後端這層擋的是
+  不守規矩的人，不是取代前端的節流
+  - 只有空白的訊息也會被丟棄（畫面上是一個沒有內容的氣泡）
+  - 同一個人開兩個分頁是兩條連線，額度各自獨立
 
 ### 6.3 server → client
 
@@ -521,9 +638,9 @@ python tools/run_swarm.py --n 5 --idle
 
 | 現象 | 原因 | 前端該做什麼 |
 |---|---|---|
-| **超長欄位回 500，不是 422** | 長度規則只寫在資料庫（`sql/001_schema.sql`），應用層刻意不重複檢查 | **前端自己擋長度**（見下表），不要依賴後端回 422 |
+| **超長欄位回 400 ＋ `code`，不是 422** | 長度規則只寫在資料庫（`sql/001_schema.sql`），應用層刻意不重複檢查；422 代表規則被搬進了 Pydantic | 讀 `code`（＝ constraint 名稱）。**前端仍然自己擋長度**（見下表），錯誤訊息比較好寫 |
 | 重複呼叫 `/api/login` 會一直長出新名片 | `login` 是 insert | 先 `GET /api/me` |
-| `read_at` 永遠是 null | 沒有標記已讀的端點 | 未讀狀態目前只能做在前端 |
+| ~~`read_at` 永遠是 null~~ | 2026-09-19 BE-G35 加了 `POST /api/messages/{id}/read` | 未讀可以做在後端了，見 §5.5 |
 | 收不到 `pos` | 靜止時不送 | 不要當斷線 |
 | WS 送了訊息但沒反應 | 不合協定的訊息靜默丟棄 | 檢查格式（尤其 `x`/`y` 必須是整數） |
 | 走廊人數不會自己更新 | `online_count` 只在 REST 回應裡 | 自行輪詢 |
@@ -539,6 +656,8 @@ python tools/run_swarm.py --n 5 --idle
 | WS 狀態文字 | 12 字以內（超過會被靜默丟棄） |
 | `projects.title` / `body` | 無資料庫上限，但仍建議前端設合理值 |
 | `seats.seat_index` | 0–7，且必須小於該專案的 `seat_count` |
+| `project_resources.label` | 1–100 字（算 code point），不能只有空白 |
+| `project_resources.url` | 1–2048 字，只放行 `http://`、`https://` |
 
 ---
 

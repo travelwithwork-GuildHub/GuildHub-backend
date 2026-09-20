@@ -100,10 +100,27 @@ async def test_profile_overlong_field_is_rejected_by_the_database(db, login):
 
     models.py 刻意不重複實作長度檢查（[P15]），所以 bio 超過 300 字時擋下來
     的是 schema 裡的 check，不是 422。規則只有一份。
+
+    ## 2026-09-19 [BE-G30] 裁決破例：改了這條已經綠的測試
+
+    絕對規則 2 是「不得修改已通過的測試來讓新程式通過」，這是全案唯一一次
+    例外，所以理由寫在這裡而不是只寫在 commit 訊息裡。
+
+    改的是**錯誤長什麼樣子**：以前沒有人接住 asyncpg.CheckViolationError，
+    例外一路噴到 ASGI 外面，所以這裡抓的是 `Exception`；現在集中的 handler
+    把它轉成 400 + `code`（前端清單第 1.5 條：超長回 500）。
+
+    改的**不是規則**：長度上限仍然只寫在 sql/001_schema.sql 一份，仍然不是
+    Pydantic 擋的（那就會是 422），下面第二個斷言「超長的內容不該被寫進去」
+    一字未動 —— 它才是 [P14] 真正要釘的東西。
+    test_profile_length_rules_live_only_in_the_schema 也沒有跟著放寬。
     """
     me = await login("話很多的")
-    with pytest.raises(Exception):
-        await me.patch("/api/profiles/me", json={"bio": "字" * 301})
+    response = await me.patch("/api/profiles/me", json={"bio": "字" * 301})
+
+    assert response.status_code == 400, f"回了 {response.status_code}：{response.text}"
+    assert response.json()["code"] == "profiles_bio_check"
+    assert response.status_code != 422, "422 代表規則被搬進了 Pydantic，那是另一回事"
 
     stored = await db.fetchval(
         "select bio from profiles where id = $1", uuid.UUID(me.user_id)
