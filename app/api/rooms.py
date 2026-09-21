@@ -24,18 +24,41 @@ DOOR_SLOTS = 12  # §5.2：預畫 12 個門位，用滿為止
 
 
 @router.get("/rooms", response_model=list[RoomDoorOut])
-async def list_rooms(_me: uuid.UUID = Depends(get_current_user)) -> list[RoomDoorOut]:
+async def list_rooms(
+    mine: bool = False,
+    me: uuid.UUID = Depends(get_current_user),
+) -> list[RoomDoorOut]:
     """成軍中（active）的專案就是走廊上的門。
 
     closed 的專案「門從走廊移除」（§6.1），因此這裡只查 active。
+
+    ## [BE-G38] `mine=true`：我的房間（2026-09-21 P1 裁決）
+
+    前端單一入口要把「自己所屬的房間」排在最上面。§6.2 不做成員制，所以
+    「所屬」不是新概念，只是兩個早就在資料庫裡的事實取聯集：我是發起人，
+    或 seats 裡有我。只通過密碼沒坐下的不算 —— room token 在 session 裡、
+    會過期，不是資料庫的事實。
+
+    主體條件寫在 SQL 內（CLAUDE.md 的站內信那條同理）：不是查出全部門再
+    在 Python 裡篩。
     """
     from app.main import scenes  # 延後 import：main 會 import 這個 router
 
-    rows = await db.pool().fetch(
-        "select id, title from projects where status = 'active' "
-        "order by updated_at desc limit $1",
-        DOOR_SLOTS,
-    )
+    if mine:
+        rows = await db.pool().fetch(
+            "select p.id, p.title from projects p where p.status = 'active' "
+            "and (p.owner_id = $1 or exists "
+            "(select 1 from seats s where s.project_id = p.id and s.user_id = $1)) "
+            "order by p.updated_at desc limit $2",
+            me,
+            DOOR_SLOTS,
+        )
+    else:
+        rows = await db.pool().fetch(
+            "select id, title from projects where status = 'active' "
+            "order by updated_at desc limit $1",
+            DOOR_SLOTS,
+        )
     return [
         RoomDoorOut(
             project_id=r["id"],
