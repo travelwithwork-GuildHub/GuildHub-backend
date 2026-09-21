@@ -282,6 +282,8 @@ FastAPI 標準格式，**加上一個機器可讀的 `code`**（2026-09-19 BE-G2
 > 2026-09-19：BE-G35 加了 `POST /api/messages/{message_id}/read`（§5.5），
 > 21 → 22。
 > 三次都是先有裁決才改表，而且既有端點的行為沒有跟著變。
+> 2026-09-21：BE-G38 在 `GET /api/rooms` 加了查詢參數 `mine`（§5.6）。
+> **不是新端點**，所以仍然是 22 個；不帶參數時的行為一個字都沒變。
 
 分頁一律 `?page=`，**每頁 20 筆，從 0 開始**。翻過尾頁回 `[]`（不是 404）。
 `GET /api/projects` 自 2026-09-19 起回應帶 `X-Total-Count` header（§5.3）；
@@ -447,6 +449,32 @@ GET /api/rooms
 它不會透過 WebSocket 推播，前端若要更新走廊人數，需要自行輪詢（建議 5–10 秒一次）。
 
 門的排列是一維的：`x = index × 間距`，**照回傳順序擺即可**，沒有版面演算法。
+
+#### `?mine=true`：我的房間 ★ 2026-09-21 新增（BE-G38）
+
+```http
+GET /api/rooms?mine=true
+→ 同上的格式，只列「我所屬」的房間
+```
+
+給單一入口的房間清單用：把這份排在最上面，其餘的門照舊用不帶參數的 `GET /api/rooms` 取得。
+
+「所屬」＝ **我是發起人，或我坐過這間的位子**，兩者取聯集：
+
+| 情況 | 算不算 |
+|---|---|
+| 我成軍的房間（沒坐下也算） | ✅ |
+| 我在 `seats` 裡有一格 | ✅ |
+| 只輸入過密碼、拿到 room token，沒坐下 | ❌ |
+| 已結案（`closed`） | ❌（門已經消失） |
+
+⚠️ **只通過密碼不算**：room token 存在 session 裡、8 小時過期，不是資料庫的事實。
+§6.2「共享密碼，不做成員制」沒有被翻案 —— 後端沒有成員表，這裡只是把兩個既有的事實湊起來。
+
+⚠️ **還沒坐下的新成員不會出現在自己的 `mine` 清單裡**，所以入口一定要保留「其他房間（輸入密碼）」
+這條路，否則第一次進不了房。
+
+同樣最多 12 個、依 `updated_at` 新到舊、需要登入（未登入 401）。`mine=false` 與不帶參數相同。
 
 ### 5.7 專案資源（Project Resources）★ 2026-09-16 新增
 
@@ -617,7 +645,7 @@ python tools/run_swarm.py --n 5 --idle
 6. POST /api/messages              → 私訊談隊
 7. POST /api/projects/{id}/form-team {password}
                                    → 成軍，門出現在走廊
-8. GET  /api/rooms                 → 走廊門位（含在線人數）
+8. GET  /api/rooms                 → 走廊門位（含在線人數）；?mine=true 只列我所屬的
 9. POST /api/projects/{id}/enter {password}
                                    → 拿 room_token
 10. WS  /ws?scene=room:{id}&token={room_token}
