@@ -392,6 +392,7 @@ python tools/run_swarm.py --url wss://<網址>/ws --n 5 --idle      # 靜止時 
 | 2026-09-15 | 5.4 瀏覽器 | ⏳ 等前端改成接真後端的建置 |
 | 2026-09-16 | 重啟驗證（backend 重新部署為含 [R24] 修正的版本後） | ✅ 5.1、5.2 全部通過；資料保留（名片仍 28 張）|
 | 2026-09-16 | 5.3 改跑 5 連線 10 秒 | ✅ 0 失敗，每連線 pos 9.2 Hz；**斷線後日誌 0 行 ERROR**。當時大廳有一位訪客在線，所以沒跑 40 條 —— 40 條同時斷線的情境由 `tests/realtime/test_disconnect_after_send_failure.py` 證明，正式環境的 40 條複跑併入 [D05] |
+| 2026-09-22 | [BE-G39] 退位端點上線後（`d2f3561`；schema 未變，**沒有** reset） | ✅ `/health` 200；OpenAPI 23 個端點，含 `DELETE /api/projects/{project_id}/seats`；未登入 401；登入但沒 `enter` 403 `no_room_token`；`DELETE …/seats/0` 404（發起人釋放仍不存在）。用 seed 名片 `resume_token` 登入、在**本人沒有座位**的房間連打兩次 DELETE：204、204，座位表前後一字不差。**刻意沒在正式環境做真的退位**（會改到別人看得到的資料）——實際刪除、換位、結案 409 由 `tests/test_leave_seat.py` 9 項涵蓋 |
 
 ---
 
