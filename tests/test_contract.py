@@ -49,6 +49,15 @@ EXPECTED = {
     ("POST", "/api/projects/{project_id}/resources"),
     ("PATCH", "/api/projects/{project_id}/resources/{resource_id}"),
     ("DELETE", "/api/projects/{project_id}/resources/{resource_id}"),
+    # [BE-G39] 2026-09-22 裁決加的第 23 個端點：退自己的位。§6.3「一旦入座
+    # 即固定」被翻案 —— demo 現場人走了、座位卻卡住，看起來就是壞掉。
+    #
+    # 只退自己、冪等、沒有 seat_index。下面 FORBIDDEN 裡的
+    # DELETE .../seats/{seat_index}（發起人釋放任一座位，BE-G07）沒有被翻案。
+    #
+    # 加端點就是動對外契約，所以這一列進來的同時，
+    # API-前端整合指南.md 與 tests/test_auth_gate.py 也一起改了。
+    ("DELETE", "/api/projects/{project_id}/seats"),
 }
 
 # 明確不存在的端點（附錄 B 末段：列出以防日後有人順手補上）

@@ -17,7 +17,7 @@
 import uuid
 
 import asyncpg
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
 from app import db
 from app.errors import ApiError
@@ -31,7 +31,7 @@ router = APIRouter(prefix="/api/projects", tags=["seats"])
 async def list_seats(project_id: uuid.UUID = Depends(require_room_token)) -> list[SeatOut]:
     """[P42]。座位滿即房間滿（§6.3），不需另寫容量判斷。
 
-    沒有釋放座位的端點 —— 已於 WBS v0.2 砍除（守則 §3）。
+    發起人釋放別人座位的端點仍然沒有（守則 §3）。自己退位見 leave_seat。
     """
     rows = await db.pool().fetch(
         "select seat_index, user_id, desk_template, claimed_at from seats "
@@ -139,3 +139,43 @@ async def claim_seat(
         )
 
     return SeatOut(**dict(row))
+
+
+@router.delete("/{project_id}/seats", status_code=204)
+async def leave_seat(
+    project_id: uuid.UUID = Depends(require_room_token),
+    me: uuid.UUID = Depends(get_current_user),
+) -> Response:
+    """[BE-G39] 退位：刪掉「我」在這個房間的那一格。2026-09-22 P1 裁決。
+
+    §6.3「一旦入座即固定」被翻案，但只翻到「退自己的位」：
+      · 不吃 body、不指定 seat_index —— 能刪的只有 user_id = 我 那一列。
+        發起人釋放任一座位（BE-G07）仍然不做
+      · 冪等：本來就沒坐也是 204
+      · 沒有換位端點：換位 = 退位 + 重新入座
+
+    單一句 DELETE，沒有先查。退位與別人搶同一格同時發生時，搶位那一側仍然
+    由 seats 的 primary key 擋，這裡沒有引進新的競態。
+
+    ## 為什麼 delete 不帶 status = 'active'
+
+    結案時 close_project() 已經在同一個交易內清空這個房間的座位，而 claim_seat
+    在 closed 之後寫不進來 —— 所以 closed 的房間裡永遠沒有座位可刪，條件加了
+    也不會改變結果。刪到了就一定是 active；沒刪到才需要知道原因。
+    """
+    deleted = await db.pool().fetchval(
+        "delete from seats where project_id = $1 and user_id = $2 returning seat_index",
+        project_id,
+        me,
+    )
+    if deleted is None:
+        # 沒刪到：本來沒坐（冪等，204），或房間已結案（跟入座同一組碼）。
+        # 這一句只在沒刪到之後才跑，不參與任何競爭。
+        status = await db.pool().fetchval(
+            "select status from projects where id = $1", project_id
+        )
+        if status is None:
+            raise ApiError(404, "project_not_found", "專案不存在")
+        if status != "active":
+            raise ApiError(409, "project_closed", "這個專案已經結案，座位已全數清空")
+    return Response(status_code=204)

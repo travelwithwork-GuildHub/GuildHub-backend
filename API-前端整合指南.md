@@ -230,7 +230,7 @@ FastAPI 標準格式，**加上一個機器可讀的 `code`**（2026-09-19 BE-G2
 | `room_not_open` | 404 | `enter` 一個還沒成軍的專案 |
 | `already_seated` | 409 | 你在這個房間已經有座位 |
 | `seat_taken` | 409 | 這一格已經有人 |
-| `project_closed` | 409 | 對已結案的專案成軍、認領座位或改資源 |
+| `project_closed` | 409 | 對已結案的專案成軍、認領座位、退位或改資源 |
 | `project_not_formed` | 409 | 對還沒成軍的專案改資源 |
 | `resource_limit_reached` | 409 | 專案資源筆數到上限 |
 | `login_id_taken` | 409 | 註冊撞帳號 |
@@ -265,14 +265,15 @@ FastAPI 標準格式，**加上一個機器可讀的 `code`**（2026-09-19 BE-G2
 其中一個一定會收到 409** —— 這是設計，不是 bug。兩種 409 用 `code` 區分：
 
 - `seat_taken` → 別人先坐了，刷新座位圖
-- `already_seated` → 一人只能一格（沒有換位／退位端點），帶使用者回他原本的位子
+- `already_seated` → 一人只能一格。要換位就先 `DELETE …/seats` 退位、再重新 `POST`
+  （2026-09-22 起，§5.4；沒有單獨的換位端點）
 
 （2026-09-19 之前只能比對 `detail` 的中文字串。那兩句話仍然一字未改，但請改
 讀 `code`。）
 
 ---
 
-## 5. REST 端點（22 個，已凍結）
+## 5. REST 端點（23 個，已凍結）
 
 端點集合由 `tests/test_contract.py` 鎖住，多一個少一個都會讓測試紅掉。
 **凍結後要改欄位，後端會先通知前端。**
@@ -284,6 +285,8 @@ FastAPI 標準格式，**加上一個機器可讀的 `code`**（2026-09-19 BE-G2
 > 三次都是先有裁決才改表，而且既有端點的行為沒有跟著變。
 > 2026-09-21：BE-G38 在 `GET /api/rooms` 加了查詢參數 `mine`（§5.6）。
 > **不是新端點**，所以仍然是 22 個；不帶參數時的行為一個字都沒變。
+> 2026-09-22：BE-G39 加了 `DELETE /api/projects/{project_id}/seats`（退自己的位，
+> §5.4），22 → 23。入座的兩個端點沒有變。
 
 分頁一律 `?page=`，**每頁 20 筆，從 0 開始**。翻過尾頁回 `[]`（不是 404）。
 `GET /api/projects` 自 2026-09-19 起回應帶 `X-Total-Count` header（§5.3）；
@@ -388,6 +391,7 @@ session（座位端點要用）。**前端不需要自己把 token 放進任何 
 |---|---|---|---|
 | GET | `/api/projects/{project_id}/seats` | room token | → `SeatOut[]`，依 `seat_index` 排序 |
 | POST | `/api/projects/{project_id}/seats` | room token | body `SeatClaim` → **201** `SeatOut` |
+| DELETE | `/api/projects/{project_id}/seats` | room token | 退**自己**的位，無 body → **204**（2026-09-22 新增） |
 
 ```jsonc
 // SeatClaim（送出）
@@ -401,8 +405,23 @@ session（座位端點要用）。**前端不需要自己把 token 放進任何 
 - 沒有 `enter` 過就打座位端點 → `403 {"detail":"尚未通過房間密碼驗證"}`
 - `seat_index` 範圍是 `0 ≤ index < seat_count`；超過會回 400，`detail` 會直接
   寫明「這個房間只有 N 個座位（可選 0–N-1）」
-- **沒有釋放座位的端點**（已於 WBS v0.2 砍除）。座位只在結案時全數清空
 - 座位滿等於房間滿，不需要另外判斷容量
+
+#### 退位（2026-09-22，BE-G39）
+
+`DELETE /api/projects/{project_id}/seats` 刪掉**目前登入者**在這個房間的那一格，
+那一格立刻恢復可坐。
+
+- **只刪自己的**：不吃 body、不指定 `seat_index`。發起人**不能**釋放別人的座位
+  （`DELETE …/seats/{index}` 仍然不存在，§9）
+- **冪等**：本來就沒坐、重複退位，都回 **204**
+- **換位 = 退位 + 重新入座**，兩步。沒有換位端點
+- 原子：單一句 DELETE。退位的同時有人搶那一格，搶位仍然由資料庫主鍵擋，
+  至多一個人坐進去
+- 已結案 → `409 project_closed`（跟入座同一組碼）；沒 `enter` 過 → `403 no_room_token`
+- ⚠️ **退位之後這間房會從你的 `?mine=true` 消失**，除非你是發起人（§5.6）
+- 座位變化**沒有 WS 事件**，別人要等下一次 `GET …/seats` 才看得到空位
+- 結案時座位仍然全數清空
 
 ### 5.5 站內信
 
@@ -459,12 +478,13 @@ GET /api/rooms?mine=true
 
 給單一入口的房間清單用：把這份排在最上面，其餘的門照舊用不帶參數的 `GET /api/rooms` 取得。
 
-「所屬」＝ **我是發起人，或我坐過這間的位子**，兩者取聯集：
+「所屬」＝ **我是發起人，或我現在在這間有座位**，兩者取聯集：
 
 | 情況 | 算不算 |
 |---|---|
 | 我成軍的房間（沒坐下也算） | ✅ |
 | 我在 `seats` 裡有一格 | ✅ |
+| 坐過、但已經退位（§5.4），且不是發起人 | ❌ |
 | 只輸入過密碼、拿到 room token，沒坐下 | ❌ |
 | 已結案（`closed`） | ❌（門已經消失） |
 
@@ -473,6 +493,9 @@ GET /api/rooms?mine=true
 
 ⚠️ **還沒坐下的新成員不會出現在自己的 `mine` 清單裡**，所以入口一定要保留「其他房間（輸入密碼）」
 這條路，否則第一次進不了房。
+
+⚠️ **退位的隊員也會從 `mine` 消失**（2026-09-22）。要讓他繼續列著，後端就得記住「坐過」
+這段歷史 —— 那就是成員制，§6.2 沒有被翻案。退位的人要回來，走密碼入口。
 
 同樣最多 12 個、依 `updated_at` 新到舊、需要登入（未登入 401）。`mine=false` 與不帶參數相同。
 
@@ -652,6 +675,7 @@ python tools/run_swarm.py --n 5 --idle
     GET /api/projects/{id}/seats   → 座位圖
     POST /api/projects/{id}/seats {seat_index}
                                    → 認領座位（409 要能處理）
+    DELETE /api/projects/{id}/seats → 退位（換位 = 退位 + 再 POST）
 11. POST /api/projects/{id}/close  → 結案，座位清空、門消失
 ```
 
@@ -694,7 +718,8 @@ python tools/run_swarm.py --n 5 --idle
 以下列出來是為了避免前端等一個不會來的東西：
 
 - `PATCH` / `DELETE` `/api/messages/{id}` —— 站內信 immutable（規格 §4.2）
-- `DELETE /api/projects/{id}/seats/{index}` —— 釋放座位已砍除
+- `DELETE /api/projects/{id}/seats/{index}` —— 釋放**別人**的座位（發起人釋放任一座位）
+  已砍除。退**自己**的位是不帶 index 的 `DELETE /api/projects/{id}/seats`（§5.4）
 - `POST /api/projects/{id}/reset-password` —— 密碼重設已砍除
 - 任何 `/api/admin/*`
 - 搜尋、篩選、標記已讀、聊天歷史、通知、好友、續期／到期提醒

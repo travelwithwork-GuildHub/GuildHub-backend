@@ -158,8 +158,9 @@ python tools/run_swarm.py --n 5 --idle
 瀏覽器不收萬用字元，填了會在啟動時報錯）。前端每個請求都要帶
 `credentials: 'include'`，否則 session cookie 不會送出去，症狀是全部 401。
 
-21 個端點已凍結（原本 16 個；9/8 的 L3 加了 `POST /api/register`，
-9/16 的 BE-G12 加了 Project Resources 的 4 個）。清單的機器可讀版本是
+23 個端點已凍結（原本 16 個；9/8 的 L3 加了 `POST /api/register`，
+9/16 的 BE-G12 加了 Project Resources 的 4 個，9/19 的 BE-G35 加了標記已讀，
+9/22 的 BE-G39 加了退位 `DELETE /api/projects/{id}/seats`）。清單的機器可讀版本是
 `tests/test_contract.py` 的 `EXPECTED`，
 它會擋下任何多出來或少掉的端點；人看的版本在
 [API-前端整合指南.md](API-前端整合指南.md) §5。凍結後要改欄位必須先通知 P2。
