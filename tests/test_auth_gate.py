@@ -55,6 +55,8 @@ PROTECTED = [
     ("DELETE", f"/api/projects/{PROJECT}/resources/{RESOURCE}", None),
     # [BE-G35] 標記已讀（2026-09-19）。只追加，既有各列沒動。
     ("POST", f"/api/messages/{MESSAGE}/read", None),
+    # [BE-G39] 退位（2026-09-22）。只追加，既有各列沒動。
+    ("DELETE", f"/api/projects/{PROJECT}/seats", None),
 ]
 
 
